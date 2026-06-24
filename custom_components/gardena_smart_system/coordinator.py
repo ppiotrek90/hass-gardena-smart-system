@@ -256,7 +256,29 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
                     # Get detailed location with devices
                     detailed_location = await self.client.get_location(location.id)
                     self.locations[location.id] = detailed_location
-                    _LOGGER.debug(f"Loaded location {location.id} with {len(detailed_location.devices)} devices")
+                    # TEST PRIVATE API
+                    try:
+                        private = await self.client.get_private_devices(location.id)
+
+                        for private_device in private.get("devices", []):
+                            device_id = private_device["id"]
+
+                            if device_id in detailed_location.devices:
+                                detailed_location.devices[device_id].private_data = private_device
+
+                        _LOGGER.info(
+                            "Private API loaded for %s (%d devices)",
+                            location.name,
+                            len(private.get("devices", [])),
+                        )
+
+                    except Exception as e:
+                        _LOGGER.exception("PRIVATE API FAILED: %s", e)
+
+                    _LOGGER.debug(
+                        f"Loaded location {location.id} with {len(detailed_location.devices)} devices"
+                    )
+
                 except Exception as e:
                     _LOGGER.warning(f"Failed to get devices for location {location.id}: {e}")
                     # Keep the basic location info even if device fetch fails

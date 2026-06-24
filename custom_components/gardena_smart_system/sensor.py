@@ -21,6 +21,8 @@ from .const import (
 )
 from .coordinator import GardenaSmartSystemCoordinator
 from .entities import GardenaEntity
+from .private_helpers import get_property
+from .private_sensor import create_private_sensors
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -103,6 +105,8 @@ async def async_setup_entry(
 
     # Add API usage diagnostic sensor (one per config entry)
     entities.append(GardenaAPIUsageSensor(coordinator, entry.entry_id))
+
+    entities.extend(create_private_sensors(coordinator))
 
     _LOGGER.debug(f"Created {len(entities)} sensor entities")
     async_add_entities(entities)

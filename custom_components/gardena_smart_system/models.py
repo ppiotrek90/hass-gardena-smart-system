@@ -28,10 +28,15 @@ class GardenaDevice:
     serial: str
     services: Dict[str, List[Any]]  # Changed from Dict[str, Any] to Dict[str, List[Any]]
     location_id: str
+
+    private_data: Dict[str, Any] | None = None
     
     def __post_init__(self):
         if self.services is None:
             self.services = {}
+
+        if self.private_data is None:
+            self.private_data = {}
 
 
 @dataclass

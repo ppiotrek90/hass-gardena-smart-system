@@ -15,6 +15,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # Constants
 SMART_HOST = "https://api.smart.gardena.dev"
+PRIVATE_HOST = "https://smart.gardena.com"
 API_TIMEOUT = 30
 
 
@@ -252,3 +253,38 @@ class GardenaSmartSystemClient:
             await self._session.close()
             self._session = None
         await self.auth_manager.close() 
+
+    async def get_private_devices(self, location_id: str) -> Dict[str, Any]:
+        """Get devices from Gardena private API."""
+
+        _LOGGER.debug(f"Fetching private devices for location {location_id}")
+
+        # upewnij się, że token jest aktualny
+        await self.auth_manager.authenticate()
+
+        session = await self._get_session()
+
+        headers = {
+            "Authorization": f"Bearer {self.auth_manager._access_token}",
+            "Authorization-Provider": "husqvarna",
+            "Accept": "application/json",
+        }
+
+        url = f"{PRIVATE_HOST}/v1/devices?locationId={location_id}"
+
+        async with session.get(url, headers=headers) as response:
+            text = await response.text()
+
+            _LOGGER.debug(
+                "Private API response status=%s body=%s",
+                response.status,
+                text,
+            )
+
+            if response.status != 200:
+                raise GardenaAPIError(
+                    f"Private API error: {response.status}",
+                    response.status,
+                )
+
+            return await response.json()
