@@ -36,21 +36,16 @@ async def async_setup_entry(
     
     for location in coordinator.locations.values():
         for device in location.devices.values():
-            _LOGGER.debug(f"Checking device {device.name} ({device.id}) - Services: {list(device.services.keys())}")
-            # Add lawn mower entities if available
-            if "MOWER" in device.services:
-                mower_services = device.services["MOWER"]
-                _LOGGER.debug(f"Found {len(mower_services)} mower services for device: {device.name} ({device.id})")
-                for mower_service in mower_services:
-                    _LOGGER.debug(f"Creating lawn mower entity for service: {mower_service.id}")
-                    entities.append(GardenaLawnMower(coordinator, device, mower_service))
-            else:
-                _LOGGER.debug(f"Device {device.name} ({device.id}) has no MOWER service")
+            _LOGGER.debug(
+                "Checking device %s (%s) — services: %s",
+                device.name, device.id, list(device.services.keys()),
+            )
+            for mower_service in device.services.get("MOWER", []):
+                _LOGGER.debug("Creating lawn mower entity for service: %s", mower_service.id)
+                entities.append(GardenaLawnMower(coordinator, device, mower_service))
 
-            _LOGGER.debug(f"Created {len(entities)} lawn mower entities")
-        _LOGGER.debug(f"Adding entities to Home Assistant: {[entity.name for entity in entities]}")
-        async_add_entities(entities)
-        _LOGGER.debug("Lawn mower entities added to Home Assistant")
+    _LOGGER.debug("Adding %d lawn mower entities to Home Assistant", len(entities))
+    async_add_entities(entities)
     
     # Register custom services
     platform = async_get_current_platform()
@@ -165,10 +160,9 @@ class GardenaLawnMower(GardenaEntity, LawnMowerEntity):
         current_service = self._get_current_mower_service()
         if current_service:
             attrs.update({
-                "operating_hours": current_service.operating_hours,
                 "state": current_service.state,
                 "activity": current_service.activity,
-                "last_error_code": getattr(current_service, 'last_error_code', None),
+                "last_error_code": current_service.last_error_code,
                 "device_id": self.device.id,
                 "service_id": current_service.id,
             })

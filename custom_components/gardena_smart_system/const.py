@@ -81,9 +81,9 @@ MOWER_ACTIVITY_MAP: Final = {
     MOWER_ACTIVITY_PARKED_MOWING_COMPLETED: LawnMowerActivity.DOCKED,
     MOWER_ACTIVITY_PARKED_RAIN: LawnMowerActivity.DOCKED,
     MOWER_ACTIVITY_PARKED_DAILY_LIMIT_REACHED: LawnMowerActivity.DOCKED,
-    MOWER_ACTIVITY_STOPPED_IN_GARDEN: LawnMowerActivity.DOCKED,
+    MOWER_ACTIVITY_STOPPED_IN_GARDEN: LawnMowerActivity.PAUSED,
     MOWER_ACTIVITY_INITIATE_NEXT_ACTION: LawnMowerActivity.MOWING,
-    MOWER_ACTIVITY_SEARCHING_FOR_SATELLITES: LawnMowerActivity.DOCKED,
+    MOWER_ACTIVITY_SEARCHING_FOR_SATELLITES: LawnMowerActivity.PAUSED,
     # NONE is intentionally not mapped: the entity decides between ERROR and
     # PAUSED based on the Gardena service state instead of assuming an error.
     # See GardenaLawnMower.activity and MOWER_ERROR_STATES (#375).

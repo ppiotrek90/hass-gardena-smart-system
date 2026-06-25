@@ -11,7 +11,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .coordinator import GardenaSmartSystemCoordinator
-from .entities import GardenaDeviceEntity
+from .entities import GardenaEntity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class GardenaPowerSocketSwitch(GardenaDeviceEntity, SwitchEntity):
+class GardenaPowerSocketSwitch(GardenaEntity, SwitchEntity):
     """Representation of a Gardena power socket switch."""
 
     def __init__(self, coordinator: GardenaSmartSystemCoordinator, device, power_service) -> None:

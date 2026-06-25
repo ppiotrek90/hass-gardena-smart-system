@@ -3,40 +3,161 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from datetime import datetime
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
-    SensorEntityDescription,
 )
 from homeassistant.helpers.entity import EntityCategory
 
 from .coordinator import GardenaSmartSystemCoordinator
 from .entities import GardenaEntity
+from .models import GardenaDevice
 from .private_helpers import get_property
 
 _LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class PrivateSensorDescription(SensorEntityDescription):
+class PrivateSensorDescription:
     """Description of a private API sensor."""
 
-    ability: str = ""
-    property: str = ""
-    extractor: Callable[[Any], Any] | None = None
+    key: str
+    name: str
+    value_fn: Callable[[GardenaDevice], Any]
+
+    icon: str | None = None
+    device_class: SensorDeviceClass | None = None
+    entity_category: EntityCategory | None = None
+
+
+def parse_timestamp(value: str | None) -> datetime | None:
+    """Convert Gardena timestamp to datetime."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        # Gardena returns Unix epoch when there is no valid next start
+        if dt.year <= 1970:
+            return None
+        return dt
+    except Exception:
+        return None
 
 
 PRIVATE_SENSOR_DESCRIPTIONS: tuple[PrivateSensorDescription, ...] = (
+    # ------------------------------------------------------------------
+    # Mower
+    # ------------------------------------------------------------------
+    PrivateSensorDescription(
+        key="next_start",
+        name="Next Start",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        icon="mdi:clock-start",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda device: parse_timestamp(
+            get_property(device, "mower", "timestamp_next_start")
+        ),
+    ),
+
+    # ------------------------------------------------------------------
+    # Firmware
+    # ------------------------------------------------------------------
     PrivateSensorDescription(
         key="firmware_status",
         name="Firmware Status",
-        ability="firmware",
-        property="firmware_status",
         icon="mdi:chip",
         entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda device: get_property(device, "firmware", "firmware_status"),
+    ),
+    PrivateSensorDescription(
+        key="firmware_version",
+        name="Firmware Version",
+        icon="mdi:information",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda device: get_property(device, "device_info", "version"),
+    ),
+
+    # ------------------------------------------------------------------
+    # Battery
+    # ------------------------------------------------------------------
+    PrivateSensorDescription(
+        key="battery_level",
+        name="Battery Level",
+        icon="mdi:battery-heart",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda device: get_property(device, "battery", "level"),
+    ),
+    PrivateSensorDescription(
+        key="battery_charging",
+        name="Battery Charging",
+        icon="mdi:battery-charging",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda device: get_property(device, "battery", "charging"),
+    ),
+
+    # ------------------------------------------------------------------
+    # Device info
+    # ------------------------------------------------------------------
+    PrivateSensorDescription(
+        key="connection_status",
+        name="Connection Status",
+        icon="mdi:lan-connect",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda device: get_property(
+            device, "device_info", "connection_status"
+        ),
+    ),
+    PrivateSensorDescription(
+        key="last_online",
+        name="Last Online",
+        icon="mdi:clock-outline",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda device: parse_timestamp(
+            get_property(device, "device_info", "last_time_online")
+        ),
+    ),
+
+    # ------------------------------------------------------------------
+    # Charging station
+    # ------------------------------------------------------------------
+    PrivateSensorDescription(
+        key="in_charging_station",
+        name="In Charging Station",
+        icon="mdi:ev-station",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda device: get_property(
+            device, "charging_station", "mower_in_charging_station"
+        ),
+    ),
+
+    # ------------------------------------------------------------------
+    # Rain
+    # ------------------------------------------------------------------
+    PrivateSensorDescription(
+        key="rain_enabled",
+        name="Rain Sensor Enabled",
+        icon="mdi:weather-rainy",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda device: get_property(
+            device, "mowing_according_to_rain", "is_mowing_according_to_rain_enabled"
+        ),
+    ),
+    PrivateSensorDescription(
+        key="waiting_for_rain_permission",
+        name="Waiting For Rain Permission",
+        icon="mdi:weather-pouring",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda device: get_property(
+            device,
+            "mowing_according_to_rain",
+            "is_waiting_for_permission_to_mow",
+        ),
     ),
 )
 
@@ -44,68 +165,54 @@ PRIVATE_SENSOR_DESCRIPTIONS: tuple[PrivateSensorDescription, ...] = (
 class GardenaPrivateSensor(GardenaEntity, SensorEntity):
     """Representation of a private API sensor."""
 
-    entity_description: PrivateSensorDescription
-
     def __init__(
         self,
         coordinator: GardenaSmartSystemCoordinator,
-        device,
+        device: GardenaDevice,
         description: PrivateSensorDescription,
     ) -> None:
+        """Initialize sensor."""
         super().__init__(coordinator, device, "COMMON")
 
-        self.entity_description = description
+        self._description = description
 
-        self._attr_unique_id = (
-            f"{device.id}_private_{description.key}"
-        )
-
+        self._attr_unique_id = f"{device.id}_private_api_{description.key}"
+        self._attr_name = f"{description.name} (Private)"
         self._attr_has_entity_name = True
+        self._attr_suggested_object_id = description.key
+        self._attr_device_class = description.device_class
+        self._attr_entity_category = description.entity_category
+
+        if description.icon:
+            self._attr_icon = description.icon
 
     @property
-    def native_value(self):
-        """Return sensor value."""
-
-        value = get_property(
-            self.device,
-            self.entity_description.ability,
-            self.entity_description.property,
-        )
-
-        if self.entity_description.extractor:
-            value = self.entity_description.extractor(value)
-
-        return value
+    def native_value(self) -> Any:
+        """Return sensor state."""
+        try:
+            return self._description.value_fn(self.device)
+        except Exception:
+            _LOGGER.exception(
+                "Failed to calculate private sensor '%s'",
+                self._description.key,
+            )
+            return None
 
 
 def create_private_sensors(
     coordinator: GardenaSmartSystemCoordinator,
-):
+) -> list[GardenaPrivateSensor]:
     """Create all private API sensors."""
-
-    entities = []
-
-    _LOGGER.debug("Creating private API sensors")
+    entities: list[GardenaPrivateSensor] = []
 
     for location in coordinator.locations.values():
         for device in location.devices.values():
-
             if not getattr(device, "private_data", None):
                 continue
-
             for description in PRIVATE_SENSOR_DESCRIPTIONS:
-
                 entities.append(
-                    GardenaPrivateSensor(
-                        coordinator,
-                        device,
-                        description,
-                    )
+                    GardenaPrivateSensor(coordinator, device, description)
                 )
 
-    _LOGGER.info(
-        "Created %d private sensors",
-        len(entities),
-    )
-
+    _LOGGER.info("Created %d private sensors", len(entities))
     return entities

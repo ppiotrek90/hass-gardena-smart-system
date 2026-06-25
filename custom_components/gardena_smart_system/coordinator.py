@@ -1,9 +1,11 @@
 """Data coordinator for Gardena Smart System."""
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from datetime import timedelta
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -15,40 +17,74 @@ from .websocket_client import GardenaWebSocketClient
 
 _LOGGER = logging.getLogger(__name__)
 
+# Private API is polled at startup and then at most once per this many seconds,
+# triggered by WebSocket events.  We don't want to poll on every event (mower
+# sends many events while cutting) but we do want reasonably fresh stats data.
+# 3600 s = 1 request/hour = ~168 requests/week — well within the 700/week quota.
+_PRIVATE_REFRESH_MIN_INTERVAL: float = 300.0
+
+# How long to wait after a WebSocket event before hitting the private API.
+# Batches rapid bursts of events (e.g. mower status + battery + GPS all at once)
+# into a single request.
+_PRIVATE_REFRESH_DEBOUNCE: float = 5.0
+
 
 class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocation]]):
-    """Gardena Smart System Data Update Coordinator."""
+    """Gardena Smart System Data Update Coordinator.
+
+    Flow
+    ----
+    1.  ``async_config_entry_first_refresh`` fetches locations + devices from
+        the public REST API (2 requests per location) and then the private API
+        (1 request per location).  This is the *only* REST call we ever make
+        for device state — the public API's 700 req/week quota must last.
+    2.  A WebSocket connection is opened.  Every state change (mower activity,
+        valve status, battery …) arrives as a push message and is applied
+        in-place via ``_update_service_attributes``.
+    3.  When a WebSocket event arrives, ``_request_private_refresh`` schedules
+        a *debounced, rate-limited* call to the private API so that the extra
+        data (GPS, stats, firmware …) stays reasonably fresh without hammering
+        the quota.  The minimum interval between private refreshes is
+        ``_PRIVATE_REFRESH_MIN_INTERVAL`` (1 h by default).
+    """
 
     def __init__(self, hass: HomeAssistant, client: GardenaSmartSystemClient) -> None:
         """Initialize the coordinator."""
         self.client = client
         self.locations: Dict[str, GardenaLocation] = {}
-        self.websocket_client: GardenaWebSocketClient | None = None
+        self.websocket_client: Optional[GardenaWebSocketClient] = None
         self._initial_data_loaded = False
-        
-        # Set update interval to None to disable periodic updates
-        # All updates will come through WebSocket
+
+        # Private API throttling
+        self._private_refresh_lock = asyncio.Lock()
+        self._pending_private_refresh: Optional[asyncio.Task] = None
+        self._last_private_refresh: float = 0.0  # monotonic timestamp
+        self._private_refresh_count: int = 0  # session counter
+        self._PRIVATE_REFRESH_MIN_INTERVAL: float = _PRIVATE_REFRESH_MIN_INTERVAL
+        self._periodic_private_task: Optional[asyncio.Task] = None
+
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=None,  # Disable periodic updates
+            update_interval=None,  # All updates come via WebSocket
         )
 
+    # ------------------------------------------------------------------
+    # Startup / shutdown
+    # ------------------------------------------------------------------
+
     async def async_config_entry_first_refresh(self) -> None:
-        """Refresh data for the first time only."""
+        """Fetch initial data and start the WebSocket."""
         if not self._initial_data_loaded:
             await super().async_config_entry_first_refresh()
             self._initial_data_loaded = True
-            
-            # Start WebSocket client after first data fetch
             await self._start_websocket()
         else:
-            # For subsequent calls, just return current data
             self.async_set_updated_data(self.locations)
 
     async def _start_websocket(self) -> None:
-        """Start WebSocket client for real-time events."""
+        """Start (or restart) the WebSocket client."""
         try:
             if not self.websocket_client:
                 self.websocket_client = GardenaWebSocketClient(
@@ -57,189 +93,58 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
                     hass=self.hass,
                     coordinator=self,
                 )
-            
             await self.websocket_client.start()
             _LOGGER.info("WebSocket client started successfully")
-            
-            # Notify entities that WebSocket client is now available
+
+            # Start independent periodic private API refresh loop
+            if self._periodic_private_task is None or self._periodic_private_task.done():
+                self._periodic_private_task = self.hass.async_create_task(
+                    self._periodic_private_refresh_loop(),
+                    name="gardena_private_api_loop",
+                )
+
             self.async_set_updated_data(self.locations)
-            
-        except Exception as e:
-            _LOGGER.error(f"Failed to start WebSocket client: {e}")
+        except Exception:
+            _LOGGER.exception("Failed to start WebSocket client")
 
-    async def _handle_websocket_event(self, event: Dict[str, Any]) -> None:
-        """Handle WebSocket events."""
-        try:
-            event_type = event.get("type")
-            
-            if event_type == "service_update":
-                await self._process_service_update(event)
-            elif event_type == "device_event":
-                await self._process_device_event(event["data"])
-            else:
-                _LOGGER.debug(f"Unknown event type: {event_type}")
-                
-        except Exception as e:
-            _LOGGER.error(f"Error handling WebSocket event: {e}")
+    async def async_shutdown(self) -> None:
+        """Shutdown the coordinator cleanly."""
+        _LOGGER.debug("Shutting down Gardena Smart System coordinator")
 
-    async def _process_service_update(self, event: Dict[str, Any]) -> None:
-        """Process service update from WebSocket."""
-        try:
-            # Extract service information
-            service_id = event.get("service_id")
-            service_type = event.get("service_type")
-            device_id = event.get("device_id")
-            event_data = event.get("data", {})
-            
-            _LOGGER.debug(f"Processing service update: service_id={service_id}, device_id={device_id}, type={service_type}")
-            _LOGGER.debug(f"Event data: {event_data}")
-            
-            if not device_id or not service_id:
-                _LOGGER.debug("Service update missing device_id or service_id")
-                return
-            
-            # Update the specific device/service in our data
-            await self._update_device_from_event(device_id, service_id, service_type, event_data)
-            
-            # Notify listeners of data update
-            self.async_set_updated_data(self.locations)
-            
-            _LOGGER.debug(f"Updated {service_type} service {service_id} for device {device_id} via WebSocket")
-            
-        except Exception as e:
-            _LOGGER.error(f"Error processing service update: {e}")
+        # Cancel any pending private refresh so it doesn't run after shutdown
+        if self._pending_private_refresh and not self._pending_private_refresh.done():
+            self._pending_private_refresh.cancel()
 
-    async def _process_device_event(self, event_data: Dict[str, Any]) -> None:
-        """Process device event from WebSocket."""
-        try:
-            # Extract device and service information
-            device_id = event_data.get("device_id")
-            service_id = event_data.get("service_id")
-            service_type = event_data.get("service_type")
-            
-            if not device_id or not service_id:
-                _LOGGER.debug("Event missing device_id or service_id")
-                return
-            
-            # Update the specific device/service in our data
-            await self._update_device_from_event(device_id, service_id, service_type, event_data)
-            
-            # Notify listeners of data update
-            self.async_set_updated_data(self.locations)
-            
-        except Exception as e:
-            _LOGGER.error(f"Error processing device event: {e}")
+        if self._periodic_private_task and not self._periodic_private_task.done():
+            self._periodic_private_task.cancel()
 
-    async def _update_device_from_event(self, device_id: str, service_id: str, service_type: str, event_data: Dict[str, Any]) -> None:
-        """Update device data from WebSocket event."""
-        try:
-            # Find the device in our locations
-            for location in self.locations.values():
-                if device_id in location.devices:
-                    device = location.devices[device_id]
-                    
-                    # Update the specific service
-                    if service_type in device.services:
-                        services = device.services[service_type]
-                        for service in services:
-                            if service.id == service_id:
-                                # Update service attributes based on event data
-                                await self._update_service_attributes(service, event_data)
-                                _LOGGER.debug(f"Updated {service_type} service {service_id} for device {device_id}")
-                                return
-                    
-                    _LOGGER.debug(f"Service {service_id} not found for device {device_id}")
-                    return
-            
-            _LOGGER.debug(f"Device {device_id} not found in locations")
-            
-        except Exception as e:
-            _LOGGER.error(f"Error updating device from event: {e}")
+        if self.websocket_client:
+            await self.websocket_client.stop()
+            self.websocket_client = None
 
-    async def _update_service_attributes(self, service: Any, event_data: Dict[str, Any]) -> None:
-        """Update service attributes from event data."""
-        try:
-            # Helper function to extract value from WebSocket data structure
-            def extract_value(data, key):
-                if key in data:
-                    value_data = data[key]
-                    if isinstance(value_data, dict) and 'value' in value_data:
-                        return value_data['value']
-                    return value_data
-                return None
-            
-            # Update common attributes
-            if hasattr(service, 'state') and 'state' in event_data:
-                service.state = extract_value(event_data, 'state')
-            
-            if hasattr(service, 'activity') and 'activity' in event_data:
-                service.activity = extract_value(event_data, 'activity')
-            
-            # Update service-specific attributes
-            if hasattr(service, 'battery_level') and 'batteryLevel' in event_data:
-                service.battery_level = extract_value(event_data, 'batteryLevel')
-            
-            if hasattr(service, 'battery_state') and 'batteryState' in event_data:
-                service.battery_state = extract_value(event_data, 'batteryState')
-            
-            if hasattr(service, 'rf_link_state') and 'rfLinkState' in event_data:
-                service.rf_link_state = extract_value(event_data, 'rfLinkState')
-            
-            if hasattr(service, 'rf_link_level') and 'rfLinkLevel' in event_data:
-                service.rf_link_level = extract_value(event_data, 'rfLinkLevel')
-            
-            # Update mower-specific attributes
-            if hasattr(service, 'operating_hours') and 'operatingHours' in event_data:
-                service.operating_hours = extract_value(event_data, 'operatingHours')
-            
-            if hasattr(service, 'last_error_code') and 'lastErrorCode' in event_data:
-                service.last_error_code = extract_value(event_data, 'lastErrorCode')
-            
-            # Update valve-specific attributes
-            if hasattr(service, 'duration') and 'duration' in event_data:
-                duration_data = event_data['duration']
-                if isinstance(duration_data, dict):
-                    if 'value' in duration_data:
-                        service.duration = duration_data['value']
-                    if 'timestamp' in duration_data:
-                        service.duration_timestamp = duration_data['timestamp']
-                else:
-                    service.duration = duration_data
+        if self.client:
+            await self.client.close()
 
-            # Update sensor-specific attributes
-            if hasattr(service, 'soil_humidity') and 'soilHumidity' in event_data:
-                service.soil_humidity = extract_value(event_data, 'soilHumidity')
-            
-            if hasattr(service, 'soil_temperature') and 'soilTemperature' in event_data:
-                service.soil_temperature = extract_value(event_data, 'soilTemperature')
-            
-            if hasattr(service, 'ambient_temperature') and 'ambientTemperature' in event_data:
-                service.ambient_temperature = extract_value(event_data, 'ambientTemperature')
-            
-            if hasattr(service, 'light_intensity') and 'lightIntensity' in event_data:
-                service.light_intensity = extract_value(event_data, 'lightIntensity')
-                
-        except Exception as e:
-            _LOGGER.error(f"Error updating service attributes: {e}")
+    # ------------------------------------------------------------------
+    # Initial REST data load
+    # ------------------------------------------------------------------
 
     async def _async_update_data(self) -> Dict[str, GardenaLocation]:
-        """Update data from Gardena Smart System.
+        """Fetch initial data from the public REST API.
 
-        The REST API has a hard quota of 700 requests/week. A full load costs
-        one ``GET /locations`` plus one ``GET /locations/{id}`` per location, so
-        we only ever hit REST once, at startup. Every subsequent state change
-        arrives over the WebSocket and is applied to ``self.locations`` in place
-        (see ``_update_service_attributes``).
+        This method is called exactly ONCE at startup by
+        ``async_config_entry_first_refresh``.  After that, every call just
+        returns the cached ``self.locations`` — all live updates arrive via
+        the WebSocket and are applied in-place.
 
-        ``async_request_refresh()`` is still called after each device command to
-        push the (already up to date) data to entities. Once the initial load
-        has happened we must NOT re-fetch from REST here, otherwise each valve
-        open/close would silently cost three API requests instead of one and
-        quickly exhaust the weekly quota (see issue #370).
+        The public API costs one ``GET /locations`` + one
+        ``GET /locations/{id}`` per location.  With a 700 req/week quota and
+        a weekly HA restart that leaves ~696 requests for WebSocket
+        reconnections (each costs 1 POST /v2/websocket).
         """
         if self._initial_data_loaded:
             _LOGGER.debug(
-                "Refresh requested after initial load; serving cached data "
+                "Refresh requested after initial load — serving cached data "
                 "(state is kept current via WebSocket, no REST call made)"
             )
             return self.locations
@@ -247,75 +152,327 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
         _LOGGER.debug("Starting initial data load from Gardena Smart System")
 
         try:
-            # Fetch locations only once at startup
+            # Load persisted API request history so weekly counter
+            # survives HA restarts
+            await self.client.api_tracker.async_load(self.hass)
+
             locations_list = await self.client.get_locations()
-            
-            # Convert list to dictionary and get detailed location data
+
             for location in locations_list:
                 try:
-                    # Get detailed location with devices
-                    detailed_location = await self.client.get_location(location.id)
-                    self.locations[location.id] = detailed_location
-                    # TEST PRIVATE API
-                    try:
-                        private = await self.client.get_private_devices(location.id)
-
-                        for private_device in private.get("devices", []):
-                            device_id = private_device["id"]
-
-                            if device_id in detailed_location.devices:
-                                detailed_location.devices[device_id].private_data = private_device
-
-                        _LOGGER.info(
-                            "Private API loaded for %s (%d devices)",
-                            location.name,
-                            len(private.get("devices", [])),
-                        )
-
-                    except Exception as e:
-                        _LOGGER.exception("PRIVATE API FAILED: %s", e)
-
+                    detailed = await self.client.get_location(location.id)
+                    self.locations[location.id] = detailed
                     _LOGGER.debug(
-                        f"Loaded location {location.id} with {len(detailed_location.devices)} devices"
+                        "Loaded location %s with %d devices",
+                        location.id,
+                        len(detailed.devices),
                     )
-
-                except Exception as e:
-                    _LOGGER.warning(f"Failed to get devices for location {location.id}: {e}")
-                    # Keep the basic location info even if device fetch fails
+                except Exception:
+                    _LOGGER.warning(
+                        "Failed to fetch devices for location %s — keeping basic info",
+                        location.id,
+                        exc_info=True,
+                    )
                     self.locations[location.id] = location
-            
-            _LOGGER.info("Initial data load completed. All future updates will come via WebSocket.")
+
+            # Private API — once at startup, counts as first refresh
+            await self._do_private_refresh()
+
+            _LOGGER.info(
+                "Initial data load complete. All future updates will arrive via WebSocket."
+            )
             return self.locations
-            
-        except Exception as e:
-            _LOGGER.error(f"Error loading initial data: {e}")
+
+        except Exception:
+            _LOGGER.exception("Error during initial data load")
             raise
 
-    async def async_shutdown(self) -> None:
-        """Shutdown the coordinator."""
-        _LOGGER.debug("Shutting down Gardena Smart System coordinator")
-        
-        # Stop WebSocket client
-        if self.websocket_client:
-            await self.websocket_client.stop()
-            self.websocket_client = None
-        
-        # Close client
-        if self.client:
-            await self.client.close()
+    # ------------------------------------------------------------------
+    # WebSocket event handling
+    # ------------------------------------------------------------------
+
+    async def _handle_websocket_event(self, event: Dict[str, Any]) -> None:
+        """Dispatch incoming WebSocket events to the right handler."""
+        try:
+            event_type = event.get("type")
+            if event_type == "service_update":
+                await self._process_service_update(event)
+            elif event_type == "device_event":
+                await self._process_device_event(event["data"])
+            else:
+                _LOGGER.debug("Unknown WebSocket event type: %s", event_type)
+        except Exception:
+            _LOGGER.exception("Error handling WebSocket event")
+
+    async def _process_service_update(self, event: Dict[str, Any]) -> None:
+        """Apply a service-update event to in-memory device state."""
+        service_id = event.get("service_id")
+        service_type = event.get("service_type")
+        device_id = event.get("device_id")
+        event_data = event.get("data", {})
+
+        _LOGGER.debug(
+            "Service update: service_id=%s device_id=%s type=%s",
+            service_id, device_id, service_type,
+        )
+
+        if not device_id or not service_id:
+            _LOGGER.debug("Service update missing device_id or service_id — skipping")
+            return
+
+        await self._update_device_from_event(device_id, service_id, service_type, event_data)
+
+        # Schedule a private-API refresh (debounced + rate-limited)
+        self._request_private_refresh()
+
+        self.async_set_updated_data(self.locations)
+
+    async def _process_device_event(self, event_data: Dict[str, Any]) -> None:
+        """Apply a device-event payload to in-memory device state."""
+        device_id = event_data.get("device_id")
+        service_id = event_data.get("service_id")
+        service_type = event_data.get("service_type")
+
+        if not device_id or not service_id:
+            _LOGGER.debug("Device event missing device_id or service_id — skipping")
+            return
+
+        await self._update_device_from_event(device_id, service_id, service_type, event_data)
+
+        self._request_private_refresh()
+
+        self.async_set_updated_data(self.locations)
+
+    async def _update_device_from_event(
+        self,
+        device_id: str,
+        service_id: str,
+        service_type: str,
+        event_data: Dict[str, Any],
+    ) -> None:
+        """Find the matching service object and update its attributes."""
+        for location in self.locations.values():
+            if device_id not in location.devices:
+                continue
+
+            device = location.devices[device_id]
+
+            if service_type not in device.services:
+                _LOGGER.debug(
+                    "Service type %s not found on device %s", service_type, device_id
+                )
+                return
+
+            for service in device.services[service_type]:
+                if service.id == service_id:
+                    await self._update_service_attributes(service, event_data)
+                    _LOGGER.debug(
+                        "Updated %s service %s for device %s",
+                        service_type, service_id, device_id,
+                    )
+                    return
+
+            _LOGGER.debug(
+                "Service %s not found in %s services on device %s",
+                service_id, service_type, device_id,
+            )
+            return
+
+        _LOGGER.debug("Device %s not found in any location", device_id)
+
+    async def _update_service_attributes(
+        self, service: Any, event_data: Dict[str, Any]
+    ) -> None:
+        """Apply WebSocket event payload to a service model object."""
+
+        def _val(data: Dict, key: str) -> Any:
+            """Extract a value that may be wrapped as ``{"value": ...}``."""
+            raw = data.get(key)
+            if isinstance(raw, dict) and "value" in raw:
+                return raw["value"]
+            return raw
+
+        # --- Common ---
+        if hasattr(service, "state") and "state" in event_data:
+            service.state = _val(event_data, "state")
+
+        if hasattr(service, "activity") and "activity" in event_data:
+            service.activity = _val(event_data, "activity")
+
+        if hasattr(service, "battery_level") and "batteryLevel" in event_data:
+            service.battery_level = _val(event_data, "batteryLevel")
+
+        if hasattr(service, "battery_state") and "batteryState" in event_data:
+            service.battery_state = _val(event_data, "batteryState")
+
+        if hasattr(service, "rf_link_state") and "rfLinkState" in event_data:
+            service.rf_link_state = _val(event_data, "rfLinkState")
+
+        if hasattr(service, "rf_link_level") and "rfLinkLevel" in event_data:
+            service.rf_link_level = _val(event_data, "rfLinkLevel")
+
+        # --- Mower ---
+        if hasattr(service, "operating_hours") and "operatingHours" in event_data:
+            service.operating_hours = _val(event_data, "operatingHours")
+
+        if hasattr(service, "last_error_code") and "lastErrorCode" in event_data:
+            service.last_error_code = _val(event_data, "lastErrorCode")
+
+        # --- Valve ---
+        if hasattr(service, "duration") and "duration" in event_data:
+            raw = event_data["duration"]
+            if isinstance(raw, dict):
+                if "value" in raw:
+                    service.duration = raw["value"]
+                if "timestamp" in raw:
+                    service.duration_timestamp = raw["timestamp"]
+            else:
+                service.duration = raw
+
+        # --- Sensor ---
+        for attr, key in (
+            ("soil_humidity", "soilHumidity"),
+            ("soil_temperature", "soilTemperature"),
+            ("ambient_temperature", "ambientTemperature"),
+            ("light_intensity", "lightIntensity"),
+        ):
+            if hasattr(service, attr) and key in event_data:
+                setattr(service, attr, _val(event_data, key))
+
+    # ------------------------------------------------------------------
+    # Private API — debounced, rate-limited refresh
+    # ------------------------------------------------------------------
+
+    def _request_private_refresh(self) -> None:
+        """Schedule a private-API refresh, unless one is already pending.
+
+        This is called on every WebSocket event.  To avoid hammering the
+        private API (and burning through the public-API quota for the
+        WebSocket reconnection POST) we apply two guards:
+
+        1.  **Debounce** — a single asyncio task is created and waits
+            ``_PRIVATE_REFRESH_DEBOUNCE`` seconds before running.  If another
+            event arrives during that window the existing task handles it;
+            no new task is spawned.
+
+        2.  **Rate-limit** — inside the task we check
+            ``_last_private_refresh``.  If the previous refresh was less than
+            ``_PRIVATE_REFRESH_MIN_INTERVAL`` seconds ago we skip the REST call
+            entirely and just return.  This means at most 1 private-API call
+            per hour regardless of WebSocket event frequency.
+        """
+        if (
+            self._pending_private_refresh is None
+            or self._pending_private_refresh.done()
+        ):
+            self._pending_private_refresh = self.hass.async_create_task(
+                self._debounced_private_refresh()
+            )
+
+    async def _debounced_private_refresh(self) -> None:
+        """Wait for the debounce window, then refresh if the rate-limit allows."""
+        try:
+            await asyncio.sleep(_PRIVATE_REFRESH_DEBOUNCE)
+
+            now = time.monotonic()
+            elapsed = now - self._last_private_refresh
+
+            if elapsed < _PRIVATE_REFRESH_MIN_INTERVAL:
+                _LOGGER.debug(
+                    "Private API refresh skipped — last refresh was %.0fs ago "
+                    "(min interval: %.0fs)",
+                    elapsed,
+                    _PRIVATE_REFRESH_MIN_INTERVAL,
+                )
+                return
+
+            await self._do_private_refresh()
+            self.async_set_updated_data(self.locations)
+
+        except asyncio.CancelledError:
+            pass  # Coordinator is shutting down
+        except Exception:
+            _LOGGER.exception("Error in debounced private refresh")
+        finally:
+            self._pending_private_refresh = None
+
+    async def _periodic_private_refresh_loop(self) -> None:
+        """Independent timer that refreshes private API every _PRIVATE_REFRESH_MIN_INTERVAL.
+
+        This runs regardless of WebSocket events — essential for data that
+        changes without triggering a WebSocket event (e.g. next_start schedule
+        changed in the Gardena app, firmware updates, rain sensor config).
+        """
+        try:
+            while not self._shutdown:
+                await asyncio.sleep(_PRIVATE_REFRESH_MIN_INTERVAL)
+                if self._shutdown:
+                    break
+                _LOGGER.debug(
+                    "Periodic private API refresh triggered (every %.0fs)",
+                    _PRIVATE_REFRESH_MIN_INTERVAL,
+                )
+                await self._do_private_refresh()
+                self.async_set_updated_data(self.locations)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            _LOGGER.exception("Error in periodic private refresh loop")
+
+    async def _do_private_refresh(self) -> None:
+        """Fetch private API data for all locations (the actual HTTP call)."""
+        async with self._private_refresh_lock:
+            self._last_private_refresh = time.monotonic()
+            self._private_refresh_count += 1
+
+            for location in self.locations.values():
+                try:
+                    private = await self.client.get_private_devices(location.id)
+
+                    updated = 0
+                    for private_device in private.get("devices", []):
+                        device_id = private_device.get("id")
+                        if device_id and device_id in location.devices:
+                            location.devices[device_id].private_data = private_device
+                            updated += 1
+
+                    _LOGGER.debug(
+                        "Private API refreshed for location %s — updated %d/%d devices",
+                        location.name,
+                        updated,
+                        len(private.get("devices", [])),
+                    )
+
+                except Exception:
+                    _LOGGER.exception(
+                        "Failed to refresh private API for location %s", location.name
+                    )
+
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
+
+    async def async_refresh_private_data(self) -> None:
+        """Force an immediate private API refresh (bypasses rate-limit).
+
+        Public method so that external callers (e.g. a HA service) can
+        trigger a refresh on demand.
+        """
+        await self._do_private_refresh()
+        self.async_set_updated_data(self.locations)
 
     def get_devices_by_type(self, device_type: str) -> list:
-        """Get all devices of a specific type."""
-        devices = []
-        for location in self.locations.values():
-            for device in location.devices.values():
-                if device_type in device.services:
-                    devices.append(device)
-        return devices
+        """Return all devices that have at least one service of *device_type*."""
+        return [
+            device
+            for location in self.locations.values()
+            for device in location.devices.values()
+            if device_type in device.services
+        ]
 
     def get_device_by_id(self, device_id: str) -> Any | None:
-        """Get a device by its ID."""
+        """Return a device by its ID, or None if not found."""
         for location in self.locations.values():
             if device_id in location.devices:
                 return location.devices[device_id]
-        return None 
+        return None
