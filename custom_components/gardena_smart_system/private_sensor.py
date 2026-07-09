@@ -187,10 +187,19 @@ class GardenaPrivateSensor(GardenaEntity, SensorEntity):
             self._attr_icon = description.icon
 
     @property
+    def _current_device(self):
+        """Always return the fresh device object from coordinator.
+
+        self.device is assigned at __init__ and never updated — the coordinator
+        mutates location.devices[id] in place so we must look it up each time.
+        """
+        return self.coordinator.get_device_by_id(self.device.id) or self.device
+
+    @property
     def native_value(self) -> Any:
         """Return sensor state."""
         try:
-            return self._description.value_fn(self.device)
+            return self._description.value_fn(self._current_device)
         except Exception:
             _LOGGER.exception(
                 "Failed to calculate private sensor '%s'",

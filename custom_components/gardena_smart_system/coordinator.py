@@ -299,6 +299,24 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
         if hasattr(service, "activity") and "activity" in event_data:
             service.activity = _val(event_data, "activity")
 
+            # Gardena does not send lastErrorCode: no_message when the mower
+            # recovers from an error — it only sends a new code when the error
+            # *changes*.  So if the activity switches to a known-good state and
+            # lastErrorCode was NOT included in this event, we clear it manually.
+            _OK_ACTIVITIES = {
+                "OK_CUTTING", "OK_CUTTING_TIMER_OVERRIDDEN",
+                "OK_SEARCHING", "OK_LEAVING", "OK_CHARGING",
+                "PARKED_TIMER", "PARKED_PARK_SELECTED", "PARKED_AUTOTIMER",
+                "PARKED_FROST", "PARKED_NO_LIGHT", "PARKED_MOWING_COMPLETED",
+                "PARKED_RAIN", "PARKED_DAILY_LIMIT_REACHED",
+            }
+            if (
+                hasattr(service, "last_error_code")
+                and (service.activity or "").upper() in _OK_ACTIVITIES
+                and "lastErrorCode" not in event_data
+            ):
+                service.last_error_code = "no_message"
+
         if hasattr(service, "battery_level") and "batteryLevel" in event_data:
             service.battery_level = _val(event_data, "batteryLevel")
 

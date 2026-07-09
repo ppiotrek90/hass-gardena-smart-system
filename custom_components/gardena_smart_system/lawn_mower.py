@@ -12,6 +12,8 @@ from homeassistant.helpers import config_validation as cv
 import voluptuous as vol
 
 from .const import (
+    ATTR_ACTIVITY_LABEL,
+    MOWER_ACTIVITY_LABELS,
     DOMAIN,
     MOWER_ACTIVITY_MAP,
     MOWER_ERROR_STATES,
@@ -162,6 +164,9 @@ class GardenaLawnMower(GardenaEntity, LawnMowerEntity):
             attrs.update({
                 "state": current_service.state,
                 "activity": current_service.activity,
+                ATTR_ACTIVITY_LABEL: MOWER_ACTIVITY_LABELS.get(
+                    current_service.activity or "", current_service.activity or ""
+                ),
                 "last_error_code": current_service.last_error_code,
                 "device_id": self.device.id,
                 "service_id": current_service.id,

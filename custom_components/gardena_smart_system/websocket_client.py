@@ -13,25 +13,20 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from .auth import GardenaAuthenticationManager
 from .const import (
+    API_BASE_URL,
     DOMAIN,
+    WEBSOCKET_KEEPALIVE_INTERVAL,
     WEBSOCKET_MAX_RECONNECT_ATTEMPTS,
+    WEBSOCKET_SESSION_LIFETIME,
     WEBSOCKET_SLOW_RECONNECT_INTERVAL,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-# Base URL — same host for both REST and WebSocket
-_API_BASE = "https://api.smart.gardena.dev/v2"
-
-# How often we send an application-level WEBSOCKET_PING to keep the session
-# alive.  Gardena docs say the session lasts up to 2 hours; sending every
-# 2.5 minutes gives a comfortable margin.  These JSON messages are NOT counted
-# toward the 700 req/week REST quota.
-_KEEPALIVE_INTERVAL: int = 300  # seconds — Gardena recommends every 5 minutes
-
-# Gardena sessions last at most 2 hours. We proactively reconnect after
-# 119 minutes to avoid being closed mid-flight. Must be < 7200 s.
-_SESSION_LIFETIME: int = 7140  # 119 minutes
+# Constants are defined in const.py:
+#   API_BASE_URL            — base URL for REST + WebSocket
+#   WEBSOCKET_KEEPALIVE_INTERVAL  — app-level ping interval (300 s)
+#   WEBSOCKET_SESSION_LIFETIME    — proactive reconnect threshold (7140 s)
 
 
 class GardenaWebSocketClient:
@@ -58,7 +53,7 @@ class GardenaWebSocketClient:
     alive.  We handle both directions:
 
     * **Outgoing** — ``_keepalive_loop`` sends ``WEBSOCKET_PING`` every
-      ``_KEEPALIVE_INTERVAL`` seconds (client-initiated).
+      ``WEBSOCKET_KEEPALIVE_INTERVAL`` seconds (client-initiated).
     * **Incoming** — ``_process_message`` replies with ``WEBSOCKET_PONG``
       whenever the server sends a ``WEBSOCKET_PING`` (server-initiated check).
     """
@@ -241,7 +236,7 @@ class GardenaWebSocketClient:
         try:
             session = await self.auth_manager._get_session()
             async with session.get(
-                f"{_API_BASE}/health",
+                f"{API_BASE_URL}/health",
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as response:
                 healthy = response.status == 200
@@ -298,7 +293,7 @@ class GardenaWebSocketClient:
                 return
 
             async with session.post(
-                f"{_API_BASE}/websocket",
+                f"{API_BASE_URL}/websocket",
                 headers=headers,
                 json={
                     "data": {
@@ -350,7 +345,7 @@ class GardenaWebSocketClient:
     # ------------------------------------------------------------------
 
     async def _keepalive_loop(self) -> None:
-        """Send WEBSOCKET_PING every _KEEPALIVE_INTERVAL seconds and
+        """Send WEBSOCKET_PING every WEBSOCKET_KEEPALIVE_INTERVAL seconds and
         proactively reconnect before the 2-hour session limit.
 
         Per Gardena docs:
@@ -366,14 +361,14 @@ class GardenaWebSocketClient:
 
         try:
             while self.is_connected and not self._shutdown:
-                await asyncio.sleep(_KEEPALIVE_INTERVAL)
+                await asyncio.sleep(WEBSOCKET_KEEPALIVE_INTERVAL)
 
                 if not self.is_connected or not self.websocket or self._shutdown:
                     break
 
                 # Proactive reconnect before session expires
                 session_age = time.monotonic() - session_start
-                if session_age >= _SESSION_LIFETIME:
+                if session_age >= WEBSOCKET_SESSION_LIFETIME:
                     _LOGGER.info(
                         "WebSocket session age %.0f s — proactively reconnecting "
                         "before 2-hour limit",

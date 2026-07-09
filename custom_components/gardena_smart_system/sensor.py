@@ -19,10 +19,12 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
+    ATTR_ACTIVITY_LABEL,
     ATTR_BATTERY_STATE,
     ATTR_RF_LINK_LEVEL,
     ATTR_RF_LINK_STATE,
     DOMAIN,
+    MOWER_ACTIVITY_LABELS,
     MOWER_INFORMATIONAL_CODES,
 )
 from .coordinator import GardenaSmartSystemCoordinator
@@ -289,6 +291,17 @@ class GardenaMowerErrorSensor(GardenaEntity, SensorEntity):
         if self.native_value and self.native_value != "no_message":
             return "mdi:alert-circle"
         return "mdi:check-circle-outline"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Include human-readable activity label."""
+        attrs = super().extra_state_attributes
+        svc = self._svc
+        if svc and svc.activity:
+            attrs[ATTR_ACTIVITY_LABEL] = MOWER_ACTIVITY_LABELS.get(
+                svc.activity, svc.activity
+            )
+        return attrs
 
 
 class GardenaTemperatureSensor(GardenaEntity, SensorEntity):

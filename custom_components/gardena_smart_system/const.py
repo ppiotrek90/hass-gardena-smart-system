@@ -11,9 +11,13 @@ DOMAIN: Final = "gardena_smart_system"
 # Configuration keys
 CONF_CLIENT_ID: Final = "client_id"
 CONF_CLIENT_SECRET: Final = "client_secret"
+
 # API constants
 API_BASE_URL: Final = "https://api.smart.gardena.dev/v2"
 API_TIMEOUT: Final = 30
+
+# Private API
+PRIVATE_HOST: Final = "https://smart.gardena.com"
 
 # Device types
 DEVICE_TYPE_MOWER: Final = "MOWER"
@@ -34,11 +38,7 @@ MOWER_STATE_WARNING: Final = "WARNING"
 MOWER_STATE_ERROR: Final = "ERROR"
 MOWER_STATE_UNAVAILABLE: Final = "UNAVAILABLE"
 
-# Gardena service states that represent an actual error condition. The lawn
-# mower entity only reports LawnMowerActivity.ERROR when the service state is
-# one of these — otherwise an unmapped/NONE activity (e.g. the mower stopped in
-# the garden out of battery) falls back to PAUSED instead of contradicting the
-# mower_error sensor, which reports "no error". See #375.
+# Gardena service states that represent an actual error condition.
 MOWER_ERROR_STATES: Final = frozenset({MOWER_STATE_ERROR, MOWER_STATE_WARNING})
 
 # Mower activities
@@ -63,7 +63,7 @@ MOWER_ACTIVITY_INITIATE_NEXT_ACTION: Final = "INITIATE_NEXT_ACTION"
 MOWER_ACTIVITY_SEARCHING_FOR_SATELLITES: Final = "SEARCHING_FOR_SATELLITES"
 MOWER_ACTIVITY_NONE: Final = "NONE"
 
-# Mower activity mapping to Home Assistant
+# Mower activity → HA LawnMowerActivity mapping
 MOWER_ACTIVITY_MAP: Final = {
     MOWER_ACTIVITY_PAUSED: LawnMowerActivity.PAUSED,
     MOWER_ACTIVITY_PAUSED_IN_CS: LawnMowerActivity.PAUSED,
@@ -84,42 +84,59 @@ MOWER_ACTIVITY_MAP: Final = {
     MOWER_ACTIVITY_STOPPED_IN_GARDEN: LawnMowerActivity.PAUSED,
     MOWER_ACTIVITY_INITIATE_NEXT_ACTION: LawnMowerActivity.MOWING,
     MOWER_ACTIVITY_SEARCHING_FOR_SATELLITES: LawnMowerActivity.PAUSED,
-    # NONE is intentionally not mapped: the entity decides between ERROR and
-    # PAUSED based on the Gardena service state instead of assuming an error.
-    # See GardenaLawnMower.activity and MOWER_ERROR_STATES (#375).
+}
+
+# Human-readable activity labels for dashboard display
+MOWER_ACTIVITY_LABELS: Final[dict[str, str]] = {
+    MOWER_ACTIVITY_PAUSED:                    "Paused",
+    MOWER_ACTIVITY_PAUSED_IN_CS:              "Paused in charging station",
+    MOWER_ACTIVITY_CUTTING:                   "Mowing",
+    MOWER_ACTIVITY_CUTTING_TIMER_OVERRIDDEN:  "Mowing (manual override)",
+    MOWER_ACTIVITY_SEARCHING:                 "Returning to station",
+    MOWER_ACTIVITY_LEAVING:                   "Leaving station",
+    MOWER_ACTIVITY_CHARGING:                  "Charging",
+    MOWER_ACTIVITY_PARKED_TIMER:              "Parked (schedule)",
+    MOWER_ACTIVITY_PARKED_PARK_SELECTED:      "Parked (manual)",
+    MOWER_ACTIVITY_PARKED_AUTOTIMER:          "Parked (auto timer)",
+    MOWER_ACTIVITY_PARKED_FROST:              "Parked (frost protection)",
+    MOWER_ACTIVITY_PARKED_NO_LIGHT:           "Parked (low light)",
+    MOWER_ACTIVITY_PARKED_MOWING_COMPLETED:   "Parked (mowing completed)",
+    MOWER_ACTIVITY_PARKED_RAIN:               "Parked (rain)",
+    MOWER_ACTIVITY_PARKED_DAILY_LIMIT_REACHED:"Parked (daily limit reached)",
+    MOWER_ACTIVITY_STOPPED_IN_GARDEN:         "Stopped in garden",
+    MOWER_ACTIVITY_INITIATE_NEXT_ACTION:      "Starting next action",
+    MOWER_ACTIVITY_SEARCHING_FOR_SATELLITES:  "Searching for satellites",
+    MOWER_ACTIVITY_NONE:                      "None",
 }
 
 # Mower informational codes — operational states that are NOT errors.
-# The mower_error sensor returns "no_message" when last_error_code is in this set
-# so that user automations trigger only on real actionable errors.
 MOWER_INFORMATIONAL_CODES: Final = frozenset({
-    "no_message",                   # Already "no error"
-    "uninitialised",                # Normal boot state
-    "parked_daily_limit_reached",   # Daily schedule limit reached — normal operation
-    "outside_working_area",         # Mower returned to base outside its zone — normal
-    "off_disabled",                 # Disabled manually by user
-    "off_hatch_open",               # Hatch open for maintenance
-    "off_hatch_closed",             # Hatch closed — normal state
-    "wait_updating",                # Firmware update in progress
-    "wait_power_up",                # Booting up
-    "wait_stop_pressed",            # Stop button held — user-initiated maintenance
-    "wait_for_safety_pin",          # Waiting for safety pin — user-initiated maintenance
-    "guide_calibration_accomplished",  # Calibration completed successfully
-    "connection_changed",           # Network state change — informational
-    "connection_not_changed",       # Network state change — informational
+    "no_message",
+    "uninitialised",
+    "parked_daily_limit_reached",
+    "outside_working_area",
+    "off_disabled",
+    "off_hatch_open",
+    "off_hatch_closed",
+    "wait_updating",
+    "wait_power_up",
+    "wait_stop_pressed",
+    "wait_for_safety_pin",
+    "guide_calibration_accomplished",
+    "connection_changed",
+    "connection_not_changed",
 })
 
 # WebSocket configuration
-WEBSOCKET_RECONNECT_DELAY: Final = 5  # seconds
-# Number of fast (exponential-backoff) reconnection attempts before falling back
-# to a slow, quota-friendly retry cadence. The client never permanently gives up:
-# after this many attempts it keeps retrying at WEBSOCKET_SLOW_RECONNECT_INTERVAL
-# so stale data eventually recovers without a Home Assistant restart (#378).
+WEBSOCKET_RECONNECT_DELAY: Final = 5
 WEBSOCKET_MAX_RECONNECT_ATTEMPTS: Final = 10
-# Slow reconnection cadence (seconds) used once the fast attempts are exhausted.
-# One attempt/hour is ~168 POST /v2/websocket requests/week, well within the
-# 700 requests/week Gardena API quota.
 WEBSOCKET_SLOW_RECONNECT_INTERVAL: Final = 3600
+# Application-level keep-alive ping interval (seconds).
+# Gardena docs: recommended every 5 minutes, session idle timeout ~10 minutes.
+WEBSOCKET_KEEPALIVE_INTERVAL: Final = 300
+# Proactive reconnect before the 2-hour session limit (seconds).
+# 119 minutes = 7140 s — gives 1 minute margin before server closes with 1001.
+WEBSOCKET_SESSION_LIFETIME: Final = 7140
 
 # Valve duration configuration
 CONF_VALVE_DURATIONS: Final = "valve_durations"
@@ -128,4 +145,5 @@ DEFAULT_VALVE_DURATION_SECONDS: Final = 3600
 # Attribute names
 ATTR_BATTERY_STATE: Final = "battery_state"
 ATTR_RF_LINK_LEVEL: Final = "rf_link_level"
-ATTR_RF_LINK_STATE: Final = "rf_link_state" 
+ATTR_RF_LINK_STATE: Final = "rf_link_state"
+ATTR_ACTIVITY_LABEL: Final = "activity_label"
