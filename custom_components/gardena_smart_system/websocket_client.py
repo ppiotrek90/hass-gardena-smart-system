@@ -8,6 +8,7 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 import aiohttp
+from aiohttp.client_exceptions import ClientConnectionResetError
 import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
@@ -385,6 +386,9 @@ class GardenaWebSocketClient:
                     _LOGGER.debug(
                         "Sent WEBSOCKET_PING (session age: %.0f s)", session_age
                     )
+                except (ConnectionClosed, WebSocketException, ClientConnectionResetError):
+                    _LOGGER.debug("Connection closed while sending WEBSOCKET_PING")
+                    break
                 except Exception:
                     _LOGGER.debug(
                         "Failed to send WEBSOCKET_PING — connection likely dropped",
@@ -515,6 +519,8 @@ class GardenaWebSocketClient:
                 pong = {"data": {"type": "WEBSOCKET_PONG", "attributes": {}}}
                 await self.websocket.send(json.dumps(pong))
                 _LOGGER.debug("Sent WEBSOCKET_PONG")
+        except (ConnectionClosed, WebSocketException):
+            _LOGGER.debug("Connection closed while sending WEBSOCKET_PONG")
         except Exception:
             _LOGGER.debug("Failed to send WEBSOCKET_PONG", exc_info=True)
 

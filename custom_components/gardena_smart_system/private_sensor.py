@@ -112,16 +112,6 @@ PRIVATE_SENSOR_DESCRIPTIONS: tuple[PrivateSensorDescription, ...] = (
             device, "device_info", "connection_status"
         ),
     ),
-    PrivateSensorDescription(
-        key="last_online",
-        name="Last Online",
-        icon="mdi:clock-outline",
-        device_class=SensorDeviceClass.TIMESTAMP,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda device: parse_timestamp(
-            get_property(device, "device_info", "last_time_online")
-        ),
-    ),
 
     # ------------------------------------------------------------------
     # Charging station
@@ -133,30 +123,6 @@ PRIVATE_SENSOR_DESCRIPTIONS: tuple[PrivateSensorDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda device: get_property(
             device, "charging_station", "mower_in_charging_station"
-        ),
-    ),
-
-    # ------------------------------------------------------------------
-    # Rain
-    # ------------------------------------------------------------------
-    PrivateSensorDescription(
-        key="rain_enabled",
-        name="Rain Sensor Enabled",
-        icon="mdi:weather-rainy",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda device: get_property(
-            device, "mowing_according_to_rain", "is_mowing_according_to_rain_enabled"
-        ),
-    ),
-    PrivateSensorDescription(
-        key="waiting_for_rain_permission",
-        name="Waiting For Rain Permission",
-        icon="mdi:weather-pouring",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda device: get_property(
-            device,
-            "mowing_according_to_rain",
-            "is_waiting_for_permission_to_mow",
         ),
     ),
 )

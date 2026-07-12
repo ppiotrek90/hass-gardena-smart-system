@@ -7,7 +7,7 @@ import time
 from datetime import timedelta
 from typing import Any, Dict, Optional
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import EVENT_HOMEASSISTANT_STARTED, HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import DOMAIN
@@ -54,6 +54,7 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
         self.locations: Dict[str, GardenaLocation] = {}
         self.websocket_client: Optional[GardenaWebSocketClient] = None
         self._initial_data_loaded = False
+        self._shutdown = False
 
         # Private API throttling
         self._private_refresh_lock = asyncio.Lock()
@@ -96,11 +97,23 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
             await self.websocket_client.start()
             _LOGGER.info("WebSocket client started successfully")
 
-            # Start independent periodic private API refresh loop
-            if self._periodic_private_task is None or self._periodic_private_task.done():
-                self._periodic_private_task = self.hass.async_create_task(
-                    self._periodic_private_refresh_loop(),
-                    name="gardena_private_api_loop",
+            # Start the periodic private API refresh loop only after HA has
+            # fully started — starting it during bootstrap causes a setup
+            # timeout because the task is still pending when HA checks.
+            async def _start_periodic_loop(_event=None) -> None:
+                if self._periodic_private_task is None or self._periodic_private_task.done():
+                    self._periodic_private_task = self.hass.async_create_task(
+                        self._periodic_private_refresh_loop(),
+                        name="gardena_private_api_loop",
+                    )
+
+            if self.hass.is_running:
+                # HA already running (e.g. integration reloaded) — start now
+                await _start_periodic_loop()
+            else:
+                # HA still booting — wait for started event
+                self.hass.bus.async_listen_once(
+                    EVENT_HOMEASSISTANT_STARTED, _start_periodic_loop
                 )
 
             self.async_set_updated_data(self.locations)
@@ -110,6 +123,7 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
     async def async_shutdown(self) -> None:
         """Shutdown the coordinator cleanly."""
         _LOGGER.debug("Shutting down Gardena Smart System coordinator")
+        self._shutdown = True
 
         # Cancel any pending private refresh so it doesn't run after shutdown
         if self._pending_private_refresh and not self._pending_private_refresh.done():

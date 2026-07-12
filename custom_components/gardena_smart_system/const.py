@@ -1,4 +1,4 @@
-"""Constants for the Gardena Smart System integration."""
+"""Constants for the Gardena Smart System Integration."""
 from __future__ import annotations
 
 from typing import Final

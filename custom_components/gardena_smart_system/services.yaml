@@ -16,7 +16,7 @@ start_override:
           mode: box
 
 reload:
-  description: Reload the Gardena Smart System integration.
+  description: Reload the Gardena Smart System Integration.
 
 websocket_diagnostics:
   description: Get WebSocket connection diagnostics and status information.
@@ -99,4 +99,4 @@ valve_unpause:
 
 
 reconnect_websocket:
-  description: Force WebSocket reconnection for the Gardena Smart System integration.
+  description: Force WebSocket reconnection for the Gardena Smart System Integration.

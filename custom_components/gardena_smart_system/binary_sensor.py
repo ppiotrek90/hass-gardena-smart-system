@@ -29,9 +29,9 @@ def _status_device_info(entry_id: str) -> DeviceInfo:
     """DeviceInfo for the virtual 'Gardena Integration Status' device."""
     return DeviceInfo(
         identifiers={(DOMAIN, f"{_STATUS_DEVICE_ID}_{entry_id}")},
-        name="Gardena Integration Status",
+        name="Gardena Smart System Integration",
         manufacturer="Husqvarna / Gardena",
-        model="Integration",
+        model="Gardena Smart System",
         entry_type="service",
     )
 
