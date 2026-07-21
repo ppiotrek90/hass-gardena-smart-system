@@ -346,17 +346,13 @@ class GardenaWebSocketClient:
     # ------------------------------------------------------------------
 
     async def _keepalive_loop(self) -> None:
-        """Send WEBSOCKET_PING every WEBSOCKET_KEEPALIVE_INTERVAL seconds and
-        proactively reconnect before the 2-hour session limit.
+        """Monitor WebSocket session lifetime and reconnect proactively.
 
-        Per Gardena docs:
-          - Connections closed with code 1001 when idle ~10 minutes
-          - Maximum session lifetime ~2 hours
-          - Recommended keep-alive ping: every 5 minutes
-          - Clients should proactively reconnect shortly before 2 hours
+        Transport-level WebSocket ping/pong is handled automatically by
+        the websockets library via ping_interval and ping_timeout.
 
-        Ping messages are application-layer JSON — NOT REST calls, NOT
-        counted toward the 700 req/week quota.
+        This loop only monitors the Gardena WebSocket session lifetime
+        and reconnects proactively before the server-side session limit.
         """
         session_start = time.monotonic()
 
@@ -367,39 +363,36 @@ class GardenaWebSocketClient:
                 if not self.is_connected or not self.websocket or self._shutdown:
                     break
 
-                # Proactive reconnect before session expires
                 session_age = time.monotonic() - session_start
+
                 if session_age >= WEBSOCKET_SESSION_LIFETIME:
                     _LOGGER.info(
-                        "WebSocket session age %.0f s — proactively reconnecting "
-                        "before 2-hour limit",
+                        "WebSocket session age %.0f s — closing gracefully "
+                        "for proactive reconnect",
                         session_age,
                     )
-                    # Schedule reconnect from outside this task so we can
-                    # cleanly cancel ourselves first
-                    self.hass.async_create_task(self.force_reconnect())
+
+                    if self.websocket:
+                        await self.websocket.close(
+                            1000,
+                            "proactive reconnect",
+                        )
+
                     break
 
-                try:
-                    ping_msg = {"data": {"type": "WEBSOCKET_PING", "attributes": {}}}
-                    await self.websocket.send(json.dumps(ping_msg))
-                    _LOGGER.debug(
-                        "Sent WEBSOCKET_PING (session age: %.0f s)", session_age
-                    )
-                except (ConnectionClosed, WebSocketException, ClientConnectionResetError):
-                    _LOGGER.debug("Connection closed while sending WEBSOCKET_PING")
-                    break
-                except Exception:
-                    _LOGGER.debug(
-                        "Failed to send WEBSOCKET_PING — connection likely dropped",
-                        exc_info=True,
-                    )
-                    break
+                _LOGGER.debug(
+                    "WebSocket session healthy (age: %.0f s)",
+                    session_age,
+                )
 
         except asyncio.CancelledError:
             pass
+
         except Exception:
-            _LOGGER.debug("Keep-alive loop ended unexpectedly", exc_info=True)
+            _LOGGER.debug(
+                "WebSocket session monitor ended unexpectedly",
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Message listening loop

@@ -33,19 +33,6 @@ SERVICE_SCHEMA_MOWER = vol.Schema({
     ),
 })
 
-SERVICE_SCHEMA_VALVE = vol.Schema({
-    vol.Optional("device_id"): cv.string,
-    vol.Optional("service_id"): cv.string,
-    vol.Optional("duration", default=3600): vol.All(
-        cv.positive_int, vol.Range(min=60, max=14400)
-    ),
-})
-
-SERVICE_SCHEMA_VALVE_BASE = vol.Schema({
-    vol.Optional("device_id"): cv.string,
-    vol.Optional("service_id"): cv.string,
-})
-
 # Command types
 class GardenaCommand:
     """Base class for Gardena commands."""
@@ -85,43 +72,6 @@ class MowerCommand(GardenaCommand):
             self.attributes["seconds"] = seconds
 
 
-class PowerSocketCommand(GardenaCommand):
-    """Power socket-specific commands."""
-    
-    COMMANDS = {
-        "START_SECONDS_TO_OVERRIDE": "Turn on for specified duration",
-        "START_OVERRIDE": "Turn on indefinitely",
-        "STOP_UNTIL_NEXT_TASK": "Turn off immediately",
-        "PAUSE": "Pause automatic operation",
-        "UNPAUSE": "Resume automatic operation",
-    }
-    
-    def __init__(self, service_id: str, command: str, seconds: Optional[int] = None):
-        """Initialize power socket command."""
-        super().__init__(service_id, "POWER_SOCKET_CONTROL")
-        self.attributes["command"] = command
-        if seconds and command == "START_SECONDS_TO_OVERRIDE":
-            self.attributes["seconds"] = seconds
-
-
-class ValveCommand(GardenaCommand):
-    """Valve-specific commands."""
-    
-    COMMANDS = {
-        "START_SECONDS_TO_OVERRIDE": "Open valve for specified duration",
-        "STOP_UNTIL_NEXT_TASK": "Close valve immediately",
-        "PAUSE": "Pause automatic operation",
-        "UNPAUSE": "Resume automatic operation",
-    }
-    
-    def __init__(self, service_id: str, command: str, seconds: Optional[int] = None):
-        """Initialize valve command."""
-        super().__init__(service_id, "VALVE_CONTROL")
-        self.attributes["command"] = command
-        if seconds and command == "START_SECONDS_TO_OVERRIDE":
-            self.attributes["seconds"] = seconds
-
-
 class GardenaServiceManager:
     """Manager for Gardena device services."""
     
@@ -156,66 +106,7 @@ class GardenaServiceManager:
             "mower_park_until_notice",
             self._service_mower_park_until_notice,
             schema=SERVICE_SCHEMA_BASE,
-        )
-        
-        # Power socket services
-        self.hass.services.async_register(
-            DOMAIN,
-            "power_socket_on",
-            self._service_power_socket_on,
-            schema=SERVICE_SCHEMA_DURATION,
-        )
-        self.hass.services.async_register(
-            DOMAIN,
-            "power_socket_on_indefinite",
-            self._service_power_socket_on_indefinite,
-            schema=SERVICE_SCHEMA_BASE,
-        )
-        self.hass.services.async_register(
-            DOMAIN,
-            "power_socket_off",
-            self._service_power_socket_off,
-            schema=SERVICE_SCHEMA_BASE,
-        )
-        self.hass.services.async_register(
-            DOMAIN,
-            "power_socket_pause",
-            self._service_power_socket_pause,
-            schema=SERVICE_SCHEMA_BASE,
-        )
-        self.hass.services.async_register(
-            DOMAIN,
-            "power_socket_unpause",
-            self._service_power_socket_unpause,
-            schema=SERVICE_SCHEMA_BASE,
-        )
-        
-        # Valve services
-        self.hass.services.async_register(
-            DOMAIN,
-            "valve_open",
-            self._service_valve_open,
-            schema=SERVICE_SCHEMA_VALVE,
-        )
-        self.hass.services.async_register(
-            DOMAIN,
-            "valve_close",
-            self._service_valve_close,
-            schema=SERVICE_SCHEMA_VALVE_BASE,
-        )
-        self.hass.services.async_register(
-            DOMAIN,
-            "valve_pause",
-            self._service_valve_pause,
-            schema=SERVICE_SCHEMA_VALVE_BASE,
-        )
-        self.hass.services.async_register(
-            DOMAIN,
-            "valve_unpause",
-            self._service_valve_unpause,
-            schema=SERVICE_SCHEMA_VALVE_BASE,
-        )
-        
+        )     
 
         # WebSocket services
         self.hass.services.async_register(
@@ -267,7 +158,7 @@ class GardenaServiceManager:
     def _get_device_service_id(self, device_id: str, service_type: str) -> Optional[str]:
         """Get service ID for device and service type.
 
-        Only use for device types that have a single service (MOWER, POWER_SOCKET, SENSOR).
+        Only use for device types that have a single service (MOWER).
         For VALVE, use _resolve_valve_service_id instead.
         """
         coordinator = self._get_coordinator(device_id)
@@ -291,46 +182,6 @@ class GardenaServiceManager:
             return services.id
         else:
             return None
-
-    def _resolve_valve_service_id(self, call: ServiceCall) -> Optional[str]:
-        """Resolve valve service ID from call data.
-
-        Supports either:
-        - service_id directly (e.g. '<device-uuid>:2')
-        - device_id (resolves to the single VALVE service, or errors if multiple)
-        """
-        if (sid := call.data.get("service_id")):
-            return sid
-
-        device_id = call.data.get("device_id")
-        if not device_id:
-            _LOGGER.error("Either device_id or service_id must be provided")
-            return None
-
-        device_id = self._resolve_device_id(device_id)
-        coordinator = self._get_coordinator(device_id)
-        if not coordinator:
-            _LOGGER.error("No coordinator found for device %s", device_id)
-            return None
-
-        device = coordinator.get_device_by_id(device_id)
-        if not device or "VALVE" not in device.services:
-            _LOGGER.error("No VALVE service found for device %s", device_id)
-            return None
-
-        services = device.services["VALVE"]
-        if not isinstance(services, list) or len(services) == 0:
-            _LOGGER.error("No VALVE service found for device %s", device_id)
-            return None
-
-        if len(services) == 1:
-            return services[0].id
-
-        _LOGGER.error(
-            "Device %s has %d VALVE services; pass service_id to choose one (available: %s)",
-            device_id, len(services), [s.id for s in services],
-        )
-        return None
 
     async def _send_command(self, service_id: str, command: GardenaCommand) -> bool:
         """Send command to device."""
@@ -392,102 +243,6 @@ class GardenaServiceManager:
         
         command = MowerCommand(service_id, "PARK_UNTIL_FURTHER_NOTICE")
         await self._send_command(service_id, command)
-
-    # Power socket services
-    async def _service_power_socket_on(self, call: ServiceCall) -> None:
-        """Turn on power socket for specified duration."""
-        device_id = self._resolve_device_id(call.data["device_id"])
-        duration = call.data["duration"]
-        service_id = self._get_device_service_id(device_id, "POWER_SOCKET")
-        if not service_id:
-            _LOGGER.error(f"No POWER_SOCKET service found for device {device_id}")
-            return
-        
-        command = PowerSocketCommand(service_id, "START_SECONDS_TO_OVERRIDE", seconds=duration)
-        await self._send_command(service_id, command)
-
-    async def _service_power_socket_on_indefinite(self, call: ServiceCall) -> None:
-        """Turn on power socket indefinitely."""
-        device_id = self._resolve_device_id(call.data["device_id"])
-        service_id = self._get_device_service_id(device_id, "POWER_SOCKET")
-        if not service_id:
-            _LOGGER.error(f"No POWER_SOCKET service found for device {device_id}")
-            return
-        
-        command = PowerSocketCommand(service_id, "START_OVERRIDE")
-        await self._send_command(service_id, command)
-
-    async def _service_power_socket_off(self, call: ServiceCall) -> None:
-        """Turn off power socket."""
-        device_id = self._resolve_device_id(call.data["device_id"])
-        service_id = self._get_device_service_id(device_id, "POWER_SOCKET")
-        if not service_id:
-            _LOGGER.error(f"No POWER_SOCKET service found for device {device_id}")
-            return
-        
-        command = PowerSocketCommand(service_id, "STOP_UNTIL_NEXT_TASK")
-        await self._send_command(service_id, command)
-
-    async def _service_power_socket_pause(self, call: ServiceCall) -> None:
-        """Pause power socket operation."""
-        device_id = self._resolve_device_id(call.data["device_id"])
-        service_id = self._get_device_service_id(device_id, "POWER_SOCKET")
-        if not service_id:
-            _LOGGER.error(f"No POWER_SOCKET service found for device {device_id}")
-            return
-        
-        command = PowerSocketCommand(service_id, "PAUSE")
-        await self._send_command(service_id, command)
-
-    async def _service_power_socket_unpause(self, call: ServiceCall) -> None:
-        """Unpause power socket operation."""
-        device_id = self._resolve_device_id(call.data["device_id"])
-        service_id = self._get_device_service_id(device_id, "POWER_SOCKET")
-        if not service_id:
-            _LOGGER.error(f"No POWER_SOCKET service found for device {device_id}")
-            return
-        
-        command = PowerSocketCommand(service_id, "UNPAUSE")
-        await self._send_command(service_id, command)
-
-    # Valve services
-    async def _service_valve_open(self, call: ServiceCall) -> None:
-        """Open valve for specified duration."""
-        service_id = self._resolve_valve_service_id(call)
-        if not service_id:
-            return
-
-        duration = call.data["duration"]
-        command = ValveCommand(service_id, "START_SECONDS_TO_OVERRIDE", seconds=duration)
-        await self._send_command(service_id, command)
-
-    async def _service_valve_close(self, call: ServiceCall) -> None:
-        """Close valve."""
-        service_id = self._resolve_valve_service_id(call)
-        if not service_id:
-            return
-
-        command = ValveCommand(service_id, "STOP_UNTIL_NEXT_TASK")
-        await self._send_command(service_id, command)
-
-    async def _service_valve_pause(self, call: ServiceCall) -> None:
-        """Pause valve operation."""
-        service_id = self._resolve_valve_service_id(call)
-        if not service_id:
-            return
-
-        command = ValveCommand(service_id, "PAUSE")
-        await self._send_command(service_id, command)
-
-    async def _service_valve_unpause(self, call: ServiceCall) -> None:
-        """Unpause valve operation."""
-        service_id = self._resolve_valve_service_id(call)
-        if not service_id:
-            return
-
-        command = ValveCommand(service_id, "UNPAUSE")
-        await self._send_command(service_id, command)
-
 
     # WebSocket services
     async def _service_reconnect_websocket(self, call: ServiceCall) -> None:

@@ -21,14 +21,12 @@ PRIVATE_HOST: Final = "https://smart.gardena.com"
 
 # Device types
 DEVICE_TYPE_MOWER: Final = "MOWER"
-DEVICE_TYPE_VALVE: Final = "VALVE"
 DEVICE_TYPE_POWER_SOCKET: Final = "POWER_SOCKET"
 DEVICE_TYPE_SENSOR: Final = "SENSOR"
 
 # Service types
 SERVICE_TYPE_COMMON: Final = "COMMON"
 SERVICE_TYPE_MOWER: Final = "MOWER"
-SERVICE_TYPE_VALVE: Final = "VALVE"
 SERVICE_TYPE_POWER_SOCKET: Final = "POWER_SOCKET"
 SERVICE_TYPE_SENSOR: Final = "SENSOR"
 
@@ -137,10 +135,6 @@ WEBSOCKET_KEEPALIVE_INTERVAL: Final = 300
 # Proactive reconnect before the 2-hour session limit (seconds).
 # 119 minutes = 7140 s — gives 1 minute margin before server closes with 1001.
 WEBSOCKET_SESSION_LIFETIME: Final = 7140
-
-# Valve duration configuration
-CONF_VALVE_DURATIONS: Final = "valve_durations"
-DEFAULT_VALVE_DURATION_SECONDS: Final = 3600
 
 # Attribute names
 ATTR_BATTERY_STATE: Final = "battery_state"

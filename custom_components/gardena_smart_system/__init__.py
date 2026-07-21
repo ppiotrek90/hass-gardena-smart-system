@@ -14,11 +14,8 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [
     Platform.LAWN_MOWER,
-    Platform.NUMBER,
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
-    Platform.SWITCH,
-    Platform.VALVE,
     Platform.BUTTON,
 ]
 

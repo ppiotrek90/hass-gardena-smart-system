@@ -211,7 +211,7 @@ class GardenaSmartSystemClient:
             if e.status_code == 404:
                 _LOGGER.error(
                     "No locations found (404). The user has no access to any location. "
-                    "Please set up the Gardena smart Gateway in the official Gardena app first."
+                    "Please set up the Gardena Smart Gateway in the official Gardena app first."
                 )
             raise
 
@@ -257,9 +257,7 @@ class GardenaSmartSystemClient:
     async def get_private_devices(self, location_id: str) -> Dict[str, Any]:
         """Get devices from Gardena private API."""
 
-        _LOGGER.debug(f"Fetching private devices for location {location_id}")
-
-        # upewnij się, że token jest aktualny
+        # Ensure the access token is valid
         await self.auth_manager.authenticate()
 
         session = await self._get_session()
@@ -275,16 +273,92 @@ class GardenaSmartSystemClient:
         async with session.get(url, headers=headers) as response:
             text = await response.text()
 
-            _LOGGER.debug(
-                "Private API response status=%s body=%s",
-                response.status,
-                text,
-            )
+            try:
+                data = json.loads(text) if text else {}
+            except json.JSONDecodeError:
+                # If Gardena returns a non-JSON response, keep the raw body
+                # available for diagnostics.
+                if response.status != 200:
+                    _LOGGER.error(
+                        "Private API error status=%s body=%s",
+                        response.status,
+                        text,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Private API returned invalid JSON: %s",
+                        text,
+                    )
 
+                raise GardenaAPIError(
+                    f"Private API returned invalid JSON: {response.status}",
+                    response.status,
+                )
+
+            # Remove large data that is not used by the integration.
+            for device in data.get("devices", []):
+                abilities = device.get("abilities", [])
+
+                # Remove schedule-related abilities completely.
+                filtered_abilities = [
+                    ability
+                    for ability in abilities
+                    if ability.get("name") not in {
+                        "mower_timer",
+                        "scheduling",
+                        "scheduling_wizard_mowing",
+                    }
+                ]
+
+                # Remove zone_map from LONA data.
+                for ability in filtered_abilities:
+                    if ability.get("name") == "lona":
+                        properties = ability.get("properties", [])
+
+                        if isinstance(properties, list):
+                            ability["properties"] = [
+                                prop
+                                for prop in properties
+                                if prop.get("name") != "zone_map"
+                            ]
+
+                device["abilities"] = filtered_abilities
+
+                # Remove scheduling wizard constraints.
+                constraints = device.get("constraints", [])
+
+                if isinstance(constraints, list):
+                    filtered_constraints = [
+                        constraint
+                        for constraint in constraints
+                        if constraint.get("resource_name")
+                        != "scheduling_wizard_mowing"
+                    ]
+
+                    if filtered_constraints:
+                        device["constraints"] = filtered_constraints
+                    else:
+                        device.pop("constraints", None)
+
+            # Errors are always logged with the already filtered response.
             if response.status != 200:
+                _LOGGER.error(
+                    "Private API error status=%s body=%s",
+                    response.status,
+                    json.dumps(data, ensure_ascii=False),
+                )
+
                 raise GardenaAPIError(
                     f"Private API error: {response.status}",
                     response.status,
                 )
 
-            return await response.json()
+            # Successful responses are logged only when DEBUG is enabled.
+            if _LOGGER.isEnabledFor(logging.DEBUG):
+                _LOGGER.debug(
+                    "Private API response status=%s body=%s",
+                    response.status,
+                    json.dumps(data, ensure_ascii=False),
+                )
+
+            return data
