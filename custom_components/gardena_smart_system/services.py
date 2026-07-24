@@ -15,22 +15,23 @@ from .models import GardenaDevice
 _LOGGER = logging.getLogger(__name__)
 
 # Service schemas
+def _validate_mower_duration(value: Any) -> int:
+    """Validate manual mowing duration required by the Gardena API."""
+    duration = cv.positive_int(value)
+    if duration < 60 or duration > 21600:
+        raise vol.Invalid("duration must be between 60 and 21600 seconds")
+    if duration % 60 != 0:
+        raise vol.Invalid("duration must be a multiple of 60 seconds")
+    return duration
+
+
 SERVICE_SCHEMA_BASE = vol.Schema({
     vol.Required("device_id"): cv.string,  # Use string for now, will be validated in service
 })
 
-SERVICE_SCHEMA_DURATION = vol.Schema({
-    vol.Required("device_id"): cv.string,
-    vol.Optional("duration", default=3600): vol.All(
-        cv.positive_int, vol.Range(min=60, max=86400)
-    ),
-})
-
 SERVICE_SCHEMA_MOWER = vol.Schema({
     vol.Required("device_id"): cv.string,
-    vol.Optional("duration", default=1800): vol.All(
-        cv.positive_int, vol.Range(min=60, max=21600)
-    ),
+    vol.Optional("duration", default=1800): _validate_mower_duration,
 })
 
 # Command types
@@ -66,9 +67,18 @@ class MowerCommand(GardenaCommand):
     
     def __init__(self, service_id: str, command: str, seconds: Optional[int] = None):
         """Initialize mower command."""
+        if command not in self.COMMANDS:
+            raise ValueError(f"Unsupported mower command: {command}")
+
         super().__init__(service_id, "MOWER_CONTROL")
         self.attributes["command"] = command
-        if seconds and command == "START_SECONDS_TO_OVERRIDE":
+
+        if command == "START_SECONDS_TO_OVERRIDE":
+            if seconds is None or seconds <= 0 or seconds % 60 != 0:
+                raise ValueError(
+                    "START_SECONDS_TO_OVERRIDE requires seconds "
+                    "to be a positive multiple of 60"
+                )
             self.attributes["seconds"] = seconds
 
 
@@ -158,8 +168,7 @@ class GardenaServiceManager:
     def _get_device_service_id(self, device_id: str, service_type: str) -> Optional[str]:
         """Get service ID for device and service type.
 
-        Only use for device types that have a single service (MOWER).
-        For VALVE, use _resolve_valve_service_id instead.
+        Mower devices are expected to expose a single MOWER service.
         """
         coordinator = self._get_coordinator(device_id)
         if not coordinator:
@@ -260,7 +269,7 @@ class GardenaServiceManager:
                     _LOGGER.info("WebSocket reconnection initiated successfully")
                     return
                 except Exception as e:
-                    _LOGGER.error(f"Failed to reconnect WebSocket: {e}")
+                    _LOGGER.error("Failed to reconnect WebSocket: %s", e)
 
         _LOGGER.error("No WebSocket client found to reconnect")
 
@@ -289,11 +298,10 @@ class GardenaServiceManager:
 
             if detailed:
                 diag.update({
-                    "websocket_url": ws_client.websocket_url,
                     "shutdown_requested": ws_client._shutdown,
                     "has_listen_task": ws_client.listen_task is not None and not ws_client.listen_task.done() if ws_client.listen_task else False,
                     "has_reconnect_task": ws_client.reconnect_task is not None and not ws_client.reconnect_task.done() if ws_client.reconnect_task else False,
                 })
 
-            _LOGGER.info(f"WebSocket diagnostics: {diag}")
+            _LOGGER.info("WebSocket diagnostics: %s", diag)
             return

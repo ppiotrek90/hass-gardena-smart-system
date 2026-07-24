@@ -12,14 +12,10 @@ from aiohttp import ClientTimeout
 
 from .api_tracker import APIRequestTracker
 from .auth import GardenaAuthError, GardenaAuthenticationManager
+from .const import API_BASE_URL, API_TIMEOUT, PRIVATE_HOST
 from .models import GardenaDataParser, GardenaLocation
 
 _LOGGER = logging.getLogger(__name__)
-
-# Constants
-SMART_HOST = "https://api.smart.gardena.dev"
-PRIVATE_HOST = "https://smart.gardena.com"
-API_TIMEOUT = 30
 
 
 class GardenaAPIError(Exception):
@@ -128,7 +124,7 @@ class GardenaSmartSystemClient:
                     await self.auth_manager.authenticate()
 
                     session = await self._get_session()
-                    url = f"{SMART_HOST}/v2{endpoint}"
+                    url = f"{API_BASE_URL}{endpoint}"
                     headers = self.auth_manager.get_auth_headers()
 
                     _LOGGER.debug(
@@ -231,11 +227,16 @@ class GardenaSmartSystemClient:
 
         response_text = await response.text()
 
-        _LOGGER.debug(
-            "Response status: %s (empty body)",
-            response.status,
-            response_text,
-        )
+        if response_text:
+            _LOGGER.debug(
+                "Response status: %s (body omitted)",
+                response.status,
+            )
+        else:
+            _LOGGER.debug(
+                "Response status: %s (empty body)",
+                response.status,
+            )
 
         # --------------------------------------------------------------
         # Successful responses
@@ -545,14 +546,12 @@ class GardenaSmartSystemClient:
         """Get devices from Gardena private API."""
 
         # Ensure the access token is valid.
-        await self.auth_manager.authenticate()
+        access_token = await self.auth_manager.authenticate()
 
         session = await self._get_session()
 
         headers = {
-            "Authorization": (
-                f"Bearer {self.auth_manager._access_token}"
-            ),
+            "Authorization": f"Bearer {access_token}",
             "Authorization-Provider": "husqvarna",
             "Accept": "application/json",
         }
