@@ -51,7 +51,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     client = GardenaSmartSystemClient(
         client_id=entry.data["client_id"],
         client_secret=entry.data["client_secret"],
-        dev_mode=True,  # Enable dev mode to bypass SSL issues on macOS
+        dev_mode=False,
     )
     
     # Create coordinator

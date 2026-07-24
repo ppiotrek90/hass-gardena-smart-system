@@ -168,8 +168,8 @@ class GardenaLawnMower(GardenaEntity, LawnMowerEntity):
 
     async def async_start_mowing(self) -> None:
         """Start mowing."""
-        _LOGGER.info(f"=== START_MOWING called for {self._attr_name} ===")
-        _LOGGER.info(f"Starting mowing for {self.device.name} ({self._mower_service.id})")
+        _LOGGER.debug(f"=== START_MOWING called for {self._attr_name} ===")
+        _LOGGER.debug(f"Starting mowing for {self.device.name} ({self._mower_service.id})")
         if self._mower_service:
             command_data = {
                 "data": {
@@ -180,11 +180,11 @@ class GardenaLawnMower(GardenaEntity, LawnMowerEntity):
                     },
                 }
             }
-            _LOGGER.info(f"Sending command: {command_data}")
+            _LOGGER.debug(f"Sending command: {command_data}")
             try:
                 await self.coordinator.client.send_command(self._mower_service.id, command_data)
                 await self.coordinator.async_request_refresh()
-                _LOGGER.info(f"=== START_MOWING completed for {self._attr_name} ===")
+                _LOGGER.debug(f"=== START_MOWING completed for {self._attr_name} ===")
             except Exception as e:
                 _LOGGER.error(f"Error in start_mowing for {self._attr_name}: {e}")
                 raise
@@ -197,8 +197,8 @@ class GardenaLawnMower(GardenaEntity, LawnMowerEntity):
 
     async def async_pause(self) -> None:
         """Pause mowing."""
-        _LOGGER.info(f"=== PAUSE called for {self._attr_name} ===")
-        _LOGGER.info(f"Pausing mowing for {self.device.name} ({self._mower_service.id})")
+        _LOGGER.debug(f"=== PAUSE called for {self._attr_name} ===")
+        _LOGGER.debug(f"Pausing mowing for {self.device.name} ({self._mower_service.id})")
         if self._mower_service:
             command_data = {
                 "data": {
@@ -209,11 +209,11 @@ class GardenaLawnMower(GardenaEntity, LawnMowerEntity):
                     },
                 }
             }
-            _LOGGER.info(f"Sending command: {command_data}")
+            _LOGGER.debug(f"Sending command: {command_data}")
             try:
                 await self.coordinator.client.send_command(self._mower_service.id, command_data)
                 await self.coordinator.async_request_refresh()
-                _LOGGER.info(f"=== PAUSE completed for {self._attr_name} ===")
+                _LOGGER.debug(f"=== PAUSE completed for {self._attr_name} ===")
             except Exception as e:
                 _LOGGER.error(f"Error in pause for {self._attr_name}: {e}")
                 raise
@@ -226,8 +226,8 @@ class GardenaLawnMower(GardenaEntity, LawnMowerEntity):
 
     async def async_dock(self) -> None:
         """Dock the mower."""
-        _LOGGER.info(f"=== DOCK called for {self._attr_name} ===")
-        _LOGGER.info(f"Docking mower {self.device.name} ({self._mower_service.id})")
+        _LOGGER.debug(f"=== DOCK called for {self._attr_name} ===")
+        _LOGGER.debug(f"Docking mower {self.device.name} ({self._mower_service.id})")
         if self._mower_service:
             command_data = {
                 "data": {
@@ -238,11 +238,11 @@ class GardenaLawnMower(GardenaEntity, LawnMowerEntity):
                     },
                 }
             }
-            _LOGGER.info(f"Sending command: {command_data}")
+            _LOGGER.debug(f"Sending command: {command_data}")
             try:
                 await self.coordinator.client.send_command(self._mower_service.id, command_data)
                 await self.coordinator.async_request_refresh()
-                _LOGGER.info(f"=== DOCK completed for {self._attr_name} ===")
+                _LOGGER.debug(f"=== DOCK completed for {self._attr_name} ===")
             except Exception as e:
                 _LOGGER.error(f"Error in dock for {self._attr_name}: {e}")
                 raise
@@ -251,7 +251,7 @@ class GardenaLawnMower(GardenaEntity, LawnMowerEntity):
 
     async def async_start_override(self, duration: int) -> None:
         """Start mowing for a specific duration."""
-        _LOGGER.info(f"Starting mowing for {duration} seconds for {self.device.name} ({self._mower_service.id})")
+        _LOGGER.debug(f"Starting mowing for {duration} seconds for {self.device.name} ({self._mower_service.id})")
         if self._mower_service:
             command_data = {
                 "data": {
@@ -268,7 +268,7 @@ class GardenaLawnMower(GardenaEntity, LawnMowerEntity):
 
     async def async_start_automatic(self) -> None:
         """Start mowing with automatic schedule."""
-        _LOGGER.info(f"Starting automatic mowing for {self.device.name} ({self._mower_service.id})")
+        _LOGGER.debug(f"Starting automatic mowing for {self.device.name} ({self._mower_service.id})")
         if self._mower_service:
             command_data = {
                 "data": {
@@ -284,7 +284,7 @@ class GardenaLawnMower(GardenaEntity, LawnMowerEntity):
 
     async def async_park_until_next_task(self) -> None:
         """Park the mower until the next scheduled task."""
-        _LOGGER.info(f"Parking mower until next task for {self.device.name} ({self._mower_service.id})")
+        _LOGGER.debug(f"Parking mower until next task for {self.device.name} ({self._mower_service.id})")
         if self._mower_service:
             command_data = {
                 "data": {
@@ -300,7 +300,7 @@ class GardenaLawnMower(GardenaEntity, LawnMowerEntity):
 
     async def async_park_until_further_notice(self) -> None:
         """Park the mower until further notice."""
-        _LOGGER.info(f"Parking mower until further notice for {self.device.name} ({self._mower_service.id})")
+        _LOGGER.debug(f"Parking mower until further notice for {self.device.name} ({self._mower_service.id})")
         if self._mower_service:
             command_data = {
                 "data": {

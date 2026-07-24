@@ -192,9 +192,11 @@ class GardenaServiceManager:
         else:
             return None
 
-    async def _send_command(self, service_id: str, command: GardenaCommand) -> bool:
+    async def _send_command(
+        self, device_id: str, service_id: str, command: GardenaCommand
+    ) -> bool:
         """Send command to device."""
-        coordinator = self._get_coordinator(service_id.split(":")[0] if ":" in service_id else service_id)
+        coordinator = self._get_coordinator(device_id)
         if not coordinator:
             _LOGGER.error("No coordinator found for device")
             return False
@@ -217,7 +219,7 @@ class GardenaServiceManager:
             return
         
         command = MowerCommand(service_id, "START_DONT_OVERRIDE")
-        await self._send_command(service_id, command)
+        await self._send_command(device_id, service_id, command)
 
     async def _service_mower_start_manual(self, call: ServiceCall) -> None:
         """Start manual mowing for specified duration."""
@@ -229,7 +231,7 @@ class GardenaServiceManager:
             return
         
         command = MowerCommand(service_id, "START_SECONDS_TO_OVERRIDE", seconds=duration)
-        await self._send_command(service_id, command)
+        await self._send_command(device_id, service_id, command)
 
     async def _service_mower_park(self, call: ServiceCall) -> None:
         """Park mower until next task."""
@@ -240,7 +242,7 @@ class GardenaServiceManager:
             return
         
         command = MowerCommand(service_id, "PARK_UNTIL_NEXT_TASK")
-        await self._send_command(service_id, command)
+        await self._send_command(device_id, service_id, command)
 
     async def _service_mower_park_until_notice(self, call: ServiceCall) -> None:
         """Park mower until further notice."""
@@ -251,7 +253,7 @@ class GardenaServiceManager:
             return
         
         command = MowerCommand(service_id, "PARK_UNTIL_FURTHER_NOTICE")
-        await self._send_command(service_id, command)
+        await self._send_command(device_id, service_id, command)
 
     # WebSocket services
     async def _service_reconnect_websocket(self, call: ServiceCall) -> None:

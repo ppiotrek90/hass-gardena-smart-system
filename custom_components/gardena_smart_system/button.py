@@ -38,13 +38,13 @@ async def async_setup_entry(
             # Add buttons if device has MOWER service
             if "MOWER" in device.services:
                 mower_services = device.services["MOWER"]
-                _LOGGER.info(
+                _LOGGER.debug(
                     f"Found {len(mower_services)} mower services for device: "
                     f"{device.name} ({device.id})"
                 )
 
                 for mower_service in mower_services:
-                    _LOGGER.info(
+                    _LOGGER.debug(
                         f"Creating button entities for mower service: {mower_service.id}"
                     )
 
@@ -76,13 +76,13 @@ async def async_setup_entry(
                         )
                     )
 
-    _LOGGER.info(f"Created {len(entities)} button entities")
-    _LOGGER.info(
+    _LOGGER.debug(f"Created {len(entities)} button entities")
+    _LOGGER.debug(
         f"Adding button entities to Home Assistant: "
         f"{[entity.name for entity in entities]}"
     )
     async_add_entities(entities)
-    _LOGGER.info("Button entities added to Home Assistant")
+    _LOGGER.debug("Button entities added to Home Assistant")
 
 
 class GardenaStartOverrideButton(GardenaEntity, ButtonEntity):
@@ -101,7 +101,7 @@ class GardenaStartOverrideButton(GardenaEntity, ButtonEntity):
         self._attr_unique_id = f"{device.id}_start_override"
         self._attr_icon = "mdi:play"
 
-        _LOGGER.info(
+        _LOGGER.debug(
             f"Initialized start override button: {self._attr_name} "
             f"with unique_id: {self._attr_unique_id}"
         )
@@ -123,7 +123,7 @@ class GardenaStartOverrideButton(GardenaEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         """Start mowing immediately for 5 hours."""
-        _LOGGER.info(
+        _LOGGER.debug(
             f"=== START OVERRIDE button pressed for {self._attr_name} ==="
         )
 
@@ -141,7 +141,7 @@ class GardenaStartOverrideButton(GardenaEntity, ButtonEntity):
                 }
             }
 
-            _LOGGER.info(f"Sending start override command: {command_data}")
+            _LOGGER.debug(f"Sending start override command: {command_data}")
 
             try:
                 await self.coordinator.client.send_command(
@@ -156,7 +156,7 @@ class GardenaStartOverrideButton(GardenaEntity, ButtonEntity):
 
                 await self.coordinator.async_request_refresh()
 
-                _LOGGER.info(
+                _LOGGER.debug(
                     f"=== START OVERRIDE button action completed "
                     f"for {self._attr_name} ==="
                 )
@@ -207,7 +207,7 @@ class GardenaResumeScheduleButton(GardenaEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         """Resume automatic mowing schedule."""
-        _LOGGER.info(
+        _LOGGER.debug(
             f"=== RESUME SCHEDULE button pressed for {self._attr_name} ==="
         )
 
@@ -222,7 +222,7 @@ class GardenaResumeScheduleButton(GardenaEntity, ButtonEntity):
                 }
             }
 
-            _LOGGER.info(f"Sending resume schedule command: {command_data}")
+            _LOGGER.debug(f"Sending resume schedule command: {command_data}")
 
             try:
                 await self.coordinator.client.send_command(
@@ -235,7 +235,7 @@ class GardenaResumeScheduleButton(GardenaEntity, ButtonEntity):
 
                 await self.coordinator.async_request_refresh()
 
-                _LOGGER.info(
+                _LOGGER.debug(
                     f"=== RESUME SCHEDULE button action completed "
                     f"for {self._attr_name} ==="
                 )
@@ -286,7 +286,7 @@ class GardenaReturnToDockButton(GardenaEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         """Park mower until next scheduled task."""
-        _LOGGER.info(
+        _LOGGER.debug(
             f"=== RETURN TO DOCK button pressed for {self._attr_name} ==="
         )
 
@@ -301,7 +301,7 @@ class GardenaReturnToDockButton(GardenaEntity, ButtonEntity):
                 }
             }
 
-            _LOGGER.info(f"Sending return to dock command: {command_data}")
+            _LOGGER.debug(f"Sending return to dock command: {command_data}")
 
             try:
                 await self.coordinator.client.send_command(
@@ -313,7 +313,7 @@ class GardenaReturnToDockButton(GardenaEntity, ButtonEntity):
 
                 await self.coordinator.async_request_refresh()
 
-                _LOGGER.info(
+                _LOGGER.debug(
                     f"=== RETURN TO DOCK button action completed "
                     f"for {self._attr_name} ==="
                 )
@@ -364,7 +364,7 @@ class GardenaParkUntilFurtherNoticeButton(GardenaEntity, ButtonEntity):
 
     async def async_press(self) -> None:
         """Park mower until further notice."""
-        _LOGGER.info(
+        _LOGGER.debug(
             f"=== PARK UNTIL FURTHER NOTICE button pressed "
             f"for {self._attr_name} ==="
         )
@@ -380,7 +380,7 @@ class GardenaParkUntilFurtherNoticeButton(GardenaEntity, ButtonEntity):
                 }
             }
 
-            _LOGGER.info(
+            _LOGGER.debug(
                 f"Sending park until further notice command: {command_data}"
             )
 
@@ -394,7 +394,7 @@ class GardenaParkUntilFurtherNoticeButton(GardenaEntity, ButtonEntity):
 
                 await self.coordinator.async_request_refresh()
 
-                _LOGGER.info(
+                _LOGGER.debug(
                     f"=== PARK UNTIL FURTHER NOTICE button action completed "
                     f"for {self._attr_name} ==="
                 )
