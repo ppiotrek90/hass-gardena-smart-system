@@ -18,6 +18,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import GardenaSmartSystemCoordinator
 from .entities import GardenaOnlineEntity
+from .private_binary_sensor import create_private_binary_sensors
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ def _status_device_info(entry_id: str) -> DeviceInfo:
     """DeviceInfo for the virtual 'Gardena Integration Status' device."""
     return DeviceInfo(
         identifiers={(DOMAIN, f"{_STATUS_DEVICE_ID}_{entry_id}")},
-        name="Gardena Smart System Integration",
+        name="Integration",
         manufacturer="Husqvarna / Gardena",
         model="Gardena Smart System",
         entry_type="service",
@@ -55,9 +56,12 @@ async def async_setup_entry(
     entities.append(GardenaWebSocketSensor(coordinator, entry.entry_id))
     entities.append(GardenaPrivateApiSensor(coordinator, entry.entry_id))
 
+    # Private API binary sensors
+    entities.extend(create_private_binary_sensors(coordinator))
+
+    _LOGGER.debug("Created %d binary sensor entities", len(entities))
     async_add_entities(entities)
-
-
+    
 # ---------------------------------------------------------------------------
 # Per-device online sensor
 # ---------------------------------------------------------------------------

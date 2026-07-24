@@ -64,34 +64,9 @@ class GardenaMowerService(GardenaService):
 
 
 @dataclass
-class GardenaPowerSocketService(GardenaService):
-    """Power socket service."""
-
-    activity: Optional[str] = None
-    duration: Optional[int] = None
-
-
-@dataclass
-class GardenaValveService(GardenaService):
-    """Valve service."""
-
-    name: Optional[str] = None
-    activity: Optional[str] = None
-    duration: Optional[int] = None
-    duration_timestamp: Optional[str] = None
-
-
-@dataclass
-class GardenaValveSetService(GardenaService):
-    """Valve set service."""
-
-
-@dataclass
 class GardenaSensorService(GardenaService):
     """Sensor service."""
 
-    soil_humidity: Optional[int] = None
-    soil_temperature: Optional[float] = None
     ambient_temperature: Optional[float] = None
     light_intensity: Optional[int] = None
 
@@ -134,7 +109,7 @@ class GardenaDataParser:
                     location_id=location.id,
                 )
             elif item["type"] in (
-                "MOWER", "POWER_SOCKET", "VALVE", "VALVE_SET", "SENSOR", "COMMON"
+                "MOWER", "SENSOR", "COMMON"
             ):
                 services.setdefault(item["type"], []).append(item)
 
@@ -202,43 +177,11 @@ class GardenaDataParser:
                 activity=_val("activity"),
                 last_error_code=_val("lastErrorCode"),
             )
-        if service_type == "POWER_SOCKET":
-            return GardenaPowerSocketService(
-                id=service_id,
-                type="POWER_SOCKET",
-                device_id=device_id,
-                state=_val("state"),
-                activity=_val("activity"),
-                duration=_val("duration"),
-                last_error_code=_val("lastErrorCode"),
-            )
-        if service_type == "VALVE":
-            return GardenaValveService(
-                id=service_id,
-                type="VALVE",
-                device_id=device_id,
-                name=_val("name"),
-                state=_val("state"),
-                activity=_val("activity"),
-                duration=_val("duration"),
-                duration_timestamp=attrs.get("duration", {}).get("timestamp"),
-                last_error_code=_val("lastErrorCode"),
-            )
-        if service_type == "VALVE_SET":
-            return GardenaValveSetService(
-                id=service_id,
-                type="VALVE_SET",
-                device_id=device_id,
-                state=_val("state"),
-                last_error_code=_val("lastErrorCode"),
-            )
         if service_type == "SENSOR":
             return GardenaSensorService(
                 id=service_id,
                 type="SENSOR",
                 device_id=device_id,
-                soil_humidity=_val("soilHumidity"),
-                soil_temperature=_val("soilTemperature"),
                 ambient_temperature=_val("ambientTemperature"),
                 light_intensity=_val("lightIntensity"),
             )

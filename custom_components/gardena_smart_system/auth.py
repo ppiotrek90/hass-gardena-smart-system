@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import ssl
 from typing import TYPE_CHECKING, Optional
 
 import aiohttp
@@ -16,7 +15,6 @@ _LOGGER = logging.getLogger(__name__)
 
 # Constants
 AUTH_HOST = "https://api.authentication.husqvarnagroup.dev"
-SMART_HOST = "https://api.smart.gardena.dev"
 API_TIMEOUT = 30
 
 
@@ -29,7 +27,13 @@ class GardenaAuthError(Exception):
 class GardenaAuthenticationManager:
     """Manages authentication for Gardena Smart System API."""
 
-    def __init__(self, client_id: str, client_secret: str, api_key: Optional[str] = None, dev_mode: bool = False):
+    def __init__(
+        self,
+        client_id: str,
+        client_secret: str,
+        api_key: Optional[str] = None,
+        dev_mode: bool = False,
+    ):
         """Initialize the authentication manager."""
         self.client_id = client_id
         self.client_secret = client_secret
@@ -49,9 +53,11 @@ class GardenaAuthenticationManager:
             # Handle SSL issues on macOS in development
             connector = None
             if self._dev_mode:
-                import ssl
                 connector = aiohttp.TCPConnector(ssl=False)
-            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+            self._session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector,
+            )
         return self._session
 
     def _is_token_valid(self) -> bool:
@@ -60,7 +66,9 @@ class GardenaAuthenticationManager:
             return False
         if not self._token_expires_at:
             return False
-        # Token expires 10 minutes before actual expiry to be safe and prevent interruptions
+
+        # Token expires 10 minutes before actual expiry to be safe
+        # and prevent interruptions.
         return asyncio.get_event_loop().time() < (self._token_expires_at - 600)
 
     async def _refresh_access_token(self) -> None:
@@ -89,24 +97,43 @@ class GardenaAuthenticationManager:
                 data=data,
                 headers=headers,
             ) as response:
-                self._track_request("POST", "/v1/oauth2/token (refresh)", response.status)
+                self._track_request(
+                    "POST",
+                    "/v1/oauth2/token (refresh)",
+                    response.status,
+                )
+
                 if response.status == 200:
                     token_data = await response.json()
                     self._access_token = token_data.get("access_token")
-                    self._refresh_token = token_data.get("refresh_token", self._refresh_token)
+                    self._refresh_token = token_data.get(
+                        "refresh_token",
+                        self._refresh_token,
+                    )
                     expires_in = token_data.get("expires_in", 3600)
-                    self._token_expires_at = asyncio.get_event_loop().time() + expires_in
+                    self._token_expires_at = (
+                        asyncio.get_event_loop().time() + expires_in
+                    )
                     _LOGGER.debug("Access token refreshed successfully")
                 else:
-                    error_text = await response.text()
-                    _LOGGER.error(f"Failed to refresh token: {response.status} - {error_text}")
+                    _LOGGER.error(
+                        "Failed to refresh token: HTTP %s",
+                        response.status,
+                    )
+
                     # Invalidate tokens on refresh failure
                     self._access_token = None
                     self._refresh_token = None
                     self._token_expires_at = None
-                    raise GardenaAuthError(f"Token refresh failed: {response.status} - {error_text}")
+
+                    raise GardenaAuthError(
+                        f"Token refresh failed: HTTP {response.status}"
+                    )
+
         except aiohttp.ClientError as e:
-            raise GardenaAuthError(f"Network error during token refresh: {e}")
+            raise GardenaAuthError(
+                f"Network error during token refresh: {e}"
+            ) from e
 
     async def authenticate(self) -> str:
         """Authenticate and return access token."""
@@ -123,7 +150,11 @@ class GardenaAuthenticationManager:
                     await self._refresh_access_token()
                     return self._access_token
                 except GardenaAuthError as e:
-                    _LOGGER.warning(f"Token refresh failed: {e}, performing new authentication")
+                    _LOGGER.warning(
+                        "Token refresh failed: %s, performing new authentication",
+                        e,
+                    )
+
                     # Clear tokens and fall through to new authentication
                     self._access_token = None
                     self._refresh_token = None
@@ -145,8 +176,13 @@ class GardenaAuthenticationManager:
                 "Accept": "application/json",
             }
 
-            _LOGGER.info("Performing initial authentication with client credentials")
-            _LOGGER.debug(f"Making auth request to {AUTH_HOST}/v1/oauth2/token with headers: {headers}")
+            _LOGGER.info(
+                "Performing initial authentication with client credentials"
+            )
+            _LOGGER.debug(
+                "Making auth request to %s/v1/oauth2/token",
+                AUTH_HOST,
+            )
 
             try:
                 async with session.post(
@@ -154,24 +190,43 @@ class GardenaAuthenticationManager:
                     data=data,
                     headers=headers,
                 ) as response:
-                    self._track_request("POST", "/v1/oauth2/token (auth)", response.status)
-                    _LOGGER.debug(f"Auth response status: {response.status}, body: {await response.text()}")
+                    self._track_request(
+                        "POST",
+                        "/v1/oauth2/token (auth)",
+                        response.status,
+                    )
+                    _LOGGER.debug(
+                        "Auth response status: %s",
+                        response.status,
+                    )
 
                     if response.status == 200:
                         token_data = await response.json()
                         self._access_token = token_data.get("access_token")
                         self._refresh_token = token_data.get("refresh_token")
                         expires_in = token_data.get("expires_in", 3600)
-                        self._token_expires_at = asyncio.get_event_loop().time() + expires_in
+                        self._token_expires_at = (
+                            asyncio.get_event_loop().time() + expires_in
+                        )
                         _LOGGER.info("Authentication successful")
                         return self._access_token
-                    else:
-                        error_text = await response.text()
-                        _LOGGER.error(f"Authentication failed: {response.status} - {error_text}")
-                        raise GardenaAuthError(f"Authentication failed: {response.status} - {error_text}")
+
+                    _LOGGER.error(
+                        "Authentication failed: HTTP %s",
+                        response.status,
+                    )
+                    raise GardenaAuthError(
+                        f"Authentication failed: HTTP {response.status}"
+                    )
+
             except aiohttp.ClientError as e:
-                _LOGGER.error(f"Network error during authentication: {e}")
-                raise GardenaAuthError(f"Network error during authentication: {e}")
+                _LOGGER.error(
+                    "Network error during authentication: %s",
+                    e,
+                )
+                raise GardenaAuthError(
+                    f"Network error during authentication: {e}"
+                ) from e
 
     def get_auth_headers(self) -> dict:
         """Get authentication headers for API requests."""
@@ -180,16 +235,26 @@ class GardenaAuthenticationManager:
             "X-Api-Key": self.client_id,
             "Content-Type": "application/vnd.api+json",
         }
-        
+
         if self._access_token:
             headers["Authorization"] = f"Bearer {self._access_token}"
-        
+
         return headers
 
-    def _track_request(self, method: str, endpoint: str, status_code: int | None) -> None:
+    def _track_request(
+        self,
+        method: str,
+        endpoint: str,
+        status_code: int | None,
+    ) -> None:
         """Record an API request in the shared tracker."""
         if self.api_tracker:
-            self.api_tracker.record(method, endpoint, status_code, source="auth")
+            self.api_tracker.record(
+                method,
+                endpoint,
+                status_code,
+                source="auth",
+            )
 
     async def close(self) -> None:
         """Close the authentication manager."""

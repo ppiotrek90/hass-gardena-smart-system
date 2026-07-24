@@ -17,7 +17,6 @@ from .const import (
     DOMAIN,
     MOWER_ACTIVITY_MAP,
     MOWER_ERROR_STATES,
-    MOWER_INFORMATIONAL_CODES,
 )
 from .coordinator import GardenaSmartSystemCoordinator
 from .entities import GardenaEntity
@@ -130,23 +129,12 @@ class GardenaLawnMower(GardenaEntity, LawnMowerEntity):
             _LOGGER.debug(f"Lawn mower {self._attr_name} activity: {activity} -> {mapped_activity}")
             return mapped_activity
 
-        # Unmapped or NONE activity. Only report ERROR when the service state
-        # flags one *and* the last_error_code is actually actionable. This keeps
-        # the entity consistent with the mower_error sensor, which uses the same
-        # MOWER_INFORMATIONAL_CODES set to decide what counts as a real error.
-        #
-        # Examples that must NOT surface as ERROR (#375):
-        #   - mower out of battery in the garden: state OK, code NO_MESSAGE
-        #   - daily operating limit reached: state WARNING, code
-        #     PARKED_DAILY_LIMIT_REACHED (battery-protection, not a fault)
-        # Both fall back to PAUSED instead of contradicting the sensor.
+        # Unmapped or NONE activity. Use the service state reported by Gardena:
+        # ERROR/WARNING -> ERROR, otherwise fall back to PAUSED.
         state = current_service.state
         error_code = (getattr(current_service, "last_error_code", None) or "").lower()
-        is_actionable_error = (
-            state in MOWER_ERROR_STATES
-            and error_code not in MOWER_INFORMATIONAL_CODES
-        )
-        fallback = LawnMowerActivity.ERROR if is_actionable_error else LawnMowerActivity.PAUSED
+        is_error = state in MOWER_ERROR_STATES
+        fallback = LawnMowerActivity.ERROR if is_error else LawnMowerActivity.PAUSED
         _LOGGER.debug(
             f"Lawn mower {self._attr_name} activity: {activity} (unmapped), "
             f"state: {state}, last_error_code: {error_code or None} -> {fallback}"

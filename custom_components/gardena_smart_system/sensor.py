@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta, timezone
-from typing import Any, List
+from datetime import datetime
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -12,7 +12,7 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import PERCENTAGE, UnitOfTemperature, UnitOfTime
+from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -25,7 +25,6 @@ from .const import (
     ATTR_RF_LINK_STATE,
     DOMAIN,
     MOWER_ACTIVITY_LABELS,
-    MOWER_INFORMATIONAL_CODES,
 )
 from .coordinator import GardenaSmartSystemCoordinator
 from .entities import GardenaEntity
@@ -63,38 +62,11 @@ async def async_setup_entry(
                 if common_service.rf_link_level is not None:
                     entities.append(GardenaRFLinkLevelSensor(coordinator, device, common_service))
 
-            # --- MOWER: error code ---
+            # --- MOWER: error code + override end ---
             for mower_service in device.services.get("MOWER", []):
                 entities.append(GardenaMowerErrorSensor(coordinator, device, mower_service))
+                entities.append(GardenaMowerOverrideEndSensor(coordinator, device, mower_service))
 
-            # --- VALVE: watering end time ---
-            for valve_service in device.services.get("VALVE", []):
-                entities.append(GardenaValveRemainingTimeSensor(coordinator, device, valve_service))
-
-            # --- SENSOR: temperature / humidity / light ---
-            for sensor_service in device.services.get("SENSOR", []):
-                is_soil = (
-                    sensor_service.soil_humidity is not None
-                    or sensor_service.soil_temperature is not None
-                )
-                if sensor_service.soil_temperature is not None:
-                    entities.append(
-                        GardenaTemperatureSensor(
-                            coordinator, device, sensor_service,
-                            "soil_temperature", is_soil,
-                        )
-                    )
-                if sensor_service.ambient_temperature is not None:
-                    entities.append(
-                        GardenaTemperatureSensor(
-                            coordinator, device, sensor_service,
-                            "ambient_temperature", is_soil,
-                        )
-                    )
-                if sensor_service.soil_humidity is not None:
-                    entities.append(GardenaHumiditySensor(coordinator, device, sensor_service))
-                if sensor_service.light_intensity is not None:
-                    entities.append(GardenaLightSensor(coordinator, device, sensor_service))
 
     # Integration-level diagnostic sensors
     entities.append(GardenaAPIUsageSensor(coordinator, entry.entry_id))
@@ -163,34 +135,42 @@ class GardenaBatterySensor(GardenaEntity, SensorEntity):
 
 
 class GardenaRFLinkLevelSensor(GardenaEntity, SensorEntity):
-    """RF link quality sensor."""
+    """Representation of a Gardena RF link quality sensor."""
 
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = PERCENTAGE
-    _attr_icon = "mdi:signal"
 
-    def __init__(self, coordinator, device, common_service) -> None:
+    def __init__(self, coordinator: GardenaSmartSystemCoordinator, device, common_service) -> None:
+        """Initialize the RF link level sensor."""
         super().__init__(coordinator, device, "COMMON")
-        self._service_id = common_service.id
+        self._common_service = common_service
         self._device_id = device.id
         self._attr_name = f"{device.name} RF Link Quality"
         self._attr_unique_id = f"{device.id}_{common_service.id}_rf_link_level"
+        self._attr_native_unit_of_measurement = PERCENTAGE
+        self._attr_icon = "mdi:signal"
 
-    @property
-    def _svc(self):
-        return _get_service(self.coordinator, self._device_id, "COMMON", self._service_id)
+    def _get_current_common_service(self):
+        """Get current common service from coordinator (fresh data)."""
+        device = self.coordinator.get_device_by_id(self._device_id)
+        if device and "COMMON" in device.services:
+            for service in device.services["COMMON"]:
+                if service.id == self._common_service.id:
+                    return service
+        return None
 
     @property
     def native_value(self) -> int | None:
-        svc = self._svc
-        return svc.rf_link_level if svc else None
+        """Return the RF link level."""
+        current_service = self._get_current_common_service()
+        return current_service.rf_link_level if current_service else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        """Return entity specific state attributes."""
         attrs = super().extra_state_attributes
-        svc = self._svc
-        if svc:
-            attrs[ATTR_RF_LINK_STATE] = svc.rf_link_state
+        current_service = self._get_current_common_service()
+        if current_service:
+            attrs[ATTR_RF_LINK_STATE] = current_service.rf_link_state
         return attrs
 
 
@@ -282,8 +262,6 @@ class GardenaMowerErrorSensor(GardenaEntity, SensorEntity):
         if not svc:
             return None
         code = (svc.last_error_code or "").lower()
-        if code in MOWER_INFORMATIONAL_CODES:
-            return "no_message"
         return code or "no_message"
 
     @property
@@ -304,123 +282,21 @@ class GardenaMowerErrorSensor(GardenaEntity, SensorEntity):
         return attrs
 
 
-class GardenaTemperatureSensor(GardenaEntity, SensorEntity):
-    """Temperature sensor (soil or ambient)."""
-
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-    _attr_device_class = SensorDeviceClass.TEMPERATURE
-    _attr_icon = "mdi:thermometer"
-
-    def __init__(self, coordinator, device, sensor_service, temp_attr: str, is_soil: bool) -> None:
-        super().__init__(coordinator, device, "SENSOR")
-        self._service_id = sensor_service.id
-        self._device_id = device.id
-        self._temp_attr = temp_attr
-
-        if temp_attr == "soil_temperature":
-            suffix = " (Soil Sensor)" if is_soil else ""
-            self._attr_name = f"{device.name} Soil Temperature{suffix}"
-            self._attr_unique_id = f"{device.id}_{sensor_service.id}_soil_temperature"
-        else:
-            self._attr_name = f"{device.name} Ambient Temperature"
-            self._attr_unique_id = f"{device.id}_{sensor_service.id}_ambient_temperature"
-
-    @property
-    def _svc(self):
-        return _get_service(self.coordinator, self._device_id, "SENSOR", self._service_id)
-
-    @property
-    def native_value(self) -> float | None:
-        svc = self._svc
-        if not svc:
-            return None
-        return svc.soil_temperature if self._temp_attr == "soil_temperature" else svc.ambient_temperature
-
-
-class GardenaHumiditySensor(GardenaEntity, SensorEntity):
-    """Soil humidity sensor."""
-
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = PERCENTAGE
-    _attr_device_class = SensorDeviceClass.MOISTURE
-    _attr_icon = "mdi:water-percent"
-
-    def __init__(self, coordinator, device, sensor_service) -> None:
-        super().__init__(coordinator, device, "SENSOR")
-        self._service_id = sensor_service.id
-        self._device_id = device.id
-        self._attr_name = f"{device.name} Soil Humidity"
-        self._attr_unique_id = f"{device.id}_{sensor_service.id}_soil_humidity"
-
-    @property
-    def _svc(self):
-        return _get_service(self.coordinator, self._device_id, "SENSOR", self._service_id)
-
-    @property
-    def native_value(self) -> int | None:
-        svc = self._svc
-        return svc.soil_humidity if svc else None
-
-
-class GardenaLightSensor(GardenaEntity, SensorEntity):
-    """Light intensity sensor."""
-
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = "lx"
-    _attr_device_class = SensorDeviceClass.ILLUMINANCE
-    _attr_icon = "mdi:white-balance-sunny"
-
-    def __init__(self, coordinator, device, sensor_service) -> None:
-        super().__init__(coordinator, device, "SENSOR")
-        self._service_id = sensor_service.id
-        self._device_id = device.id
-        self._attr_name = f"{device.name} Light Intensity"
-        self._attr_unique_id = f"{device.id}_{sensor_service.id}_light_intensity"
-
-    @property
-    def _svc(self):
-        return _get_service(self.coordinator, self._device_id, "SENSOR", self._service_id)
-
-    @property
-    def native_value(self) -> int | None:
-        svc = self._svc
-        return svc.light_intensity if svc else None
-
-
-class GardenaValveRemainingTimeSensor(GardenaEntity, SensorEntity):
-    """Timestamp sensor showing when the current watering session ends."""
+class GardenaMowerOverrideEndSensor(GardenaEntity, SensorEntity):
+    """Timestamp sensor showing when manual mowing override ends."""
 
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:timer-sand"
 
-    def __init__(self, coordinator, device, valve_service) -> None:
-        super().__init__(coordinator, device, "VALVE")
-        self._service_id = valve_service.id
+    def __init__(self, coordinator, device, mower_service) -> None:
+        super().__init__(coordinator, device, "MOWER")
         self._device_id = device.id
-        valve_name = valve_service.name or device.name
-        self._attr_name = f"{valve_name} Watering End"
-        self._attr_unique_id = f"{device.id}_{valve_service.id}_watering_end"
-
-    @property
-    def _svc(self):
-        return _get_service(self.coordinator, self._device_id, "VALVE", self._service_id)
+        self._attr_name = f"{device.name} Mowing Override End"
+        self._attr_unique_id = f"{device.id}_mowing_override_end"
 
     @property
     def native_value(self) -> datetime | None:
-        svc = self._svc
-        if not svc:
-            return None
-        if svc.activity in ("MANUAL_WATERING", "SCHEDULED_WATERING"):
-            if svc.duration and svc.duration_timestamp:
-                try:
-                    start = datetime.fromisoformat(
-                        svc.duration_timestamp.replace("Z", "+00:00")
-                    )
-                    return start + timedelta(seconds=svc.duration)
-                except (ValueError, TypeError):
-                    return None
-        return None
+        return self.coordinator.mower_override_end
 
 
 # Shared device info for integration-level status sensors
@@ -428,7 +304,7 @@ def _status_device_info(entry_id: str) -> DeviceInfo:
     """DeviceInfo for the virtual 'Gardena Integration Status' device."""
     return DeviceInfo(
         identifiers={(DOMAIN, f"gardena_integration_status_{entry_id}")},
-        name="Gardena Smart System Integration",
+        name="Integration",
         manufacturer="Husqvarna / Gardena",
         model="Gardena Smart System",
         entry_type="service",

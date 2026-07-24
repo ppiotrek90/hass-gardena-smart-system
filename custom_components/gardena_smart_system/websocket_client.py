@@ -8,15 +8,14 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 import aiohttp
-from aiohttp.client_exceptions import ClientConnectionResetError
 import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from .auth import GardenaAuthenticationManager
 from .const import (
     API_BASE_URL,
-    DOMAIN,
-    WEBSOCKET_KEEPALIVE_INTERVAL,
+    WEBSOCKET_PING_INTERVAL,
+    WEBSOCKET_SESSION_CHECK_INTERVAL,
     WEBSOCKET_MAX_RECONNECT_ATTEMPTS,
     WEBSOCKET_SESSION_LIFETIME,
     WEBSOCKET_SLOW_RECONNECT_INTERVAL,
@@ -25,9 +24,10 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 # Constants are defined in const.py:
-#   API_BASE_URL            — base URL for REST + WebSocket
-#   WEBSOCKET_KEEPALIVE_INTERVAL  — app-level ping interval (300 s)
-#   WEBSOCKET_SESSION_LIFETIME    — proactive reconnect threshold (7140 s)
+#   API_BASE_URL                       — base URL for REST + WebSocket
+#   WEBSOCKET_PING_INTERVAL            — RFC-6455 ping interval (150 s)
+#   WEBSOCKET_SESSION_CHECK_INTERVAL   — session lifetime check interval (60 s)
+#   WEBSOCKET_SESSION_LIFETIME         — proactive reconnect threshold (7140 s)
 
 
 class GardenaWebSocketClient:
@@ -47,16 +47,17 @@ class GardenaWebSocketClient:
     * A 429 response sets ``_rate_limited_until`` and blocks further URL
       requests until the back-off window expires.
 
-    Keep-alive
-    ----------
-    Gardena requires periodic application-level ``WEBSOCKET_PING`` JSON
-    messages (distinct from RFC-6455 TCP ping frames) to keep the session
-    alive.  We handle both directions:
+    Keep-alive and session lifetime
+    -------------------------------
+    Transport-level RFC-6455 ping/pong is handled by the ``websockets``
+    library. Gardena recommends a 150-second ping interval.
 
-    * **Outgoing** — ``_keepalive_loop`` sends ``WEBSOCKET_PING`` every
-      ``WEBSOCKET_KEEPALIVE_INTERVAL`` seconds (client-initiated).
-    * **Incoming** — ``_process_message`` replies with ``WEBSOCKET_PONG``
-      whenever the server sends a ``WEBSOCKET_PING`` (server-initiated check).
+    Gardena may also send an application-level ``WEBSOCKET_PING`` JSON
+    message. When received, we reply immediately with ``WEBSOCKET_PONG``.
+
+    Gardena WebSocket sessions have a two-hour lifetime. The session monitor
+    renews the connection proactively at 119 minutes, leaving a one-minute
+    margin before the documented limit.
     """
 
     def __init__(
@@ -80,11 +81,12 @@ class GardenaWebSocketClient:
 
         self.reconnect_task: Optional[asyncio.Task] = None
         self.listen_task: Optional[asyncio.Task] = None
-        self.keepalive_task: Optional[asyncio.Task] = None
+        self.session_monitor_task: Optional[asyncio.Task] = None
 
         self.reconnect_attempts = 0
         self._shutdown = False
         self._rate_limited_until: float = 0.0
+        self._proactive_reconnect = False
 
     # ------------------------------------------------------------------
     # Public interface
@@ -158,7 +160,7 @@ class GardenaWebSocketClient:
                 await self._schedule_reconnect()
                 return
 
-            _LOGGER.debug("Connecting to WebSocket: %s", self.websocket_url)
+            _LOGGER.debug("Connecting to WebSocket")
 
             ssl_context = None
             if self.auth_manager._dev_mode:
@@ -174,11 +176,11 @@ class GardenaWebSocketClient:
                 ssl_context.check_hostname = False
                 ssl_context.verify_mode = ssl.CERT_NONE
 
-            # ping_interval / ping_timeout are RFC-6455 transport-level frames —
-            # separate from the application-level WEBSOCKET_PING JSON messages.
+            # RFC-6455 transport-level keepalive. This is separate from
+            # Gardena's optional application-level WEBSOCKET_PING JSON message.
             self.websocket = await websockets.connect(
                 self.websocket_url,
-                ping_interval=30,
+                ping_interval=WEBSOCKET_PING_INTERVAL,
                 ping_timeout=10,
                 ssl=ssl_context,
             )
@@ -186,6 +188,7 @@ class GardenaWebSocketClient:
             self.is_connected = True
             self.is_connecting = False
             self.reconnect_attempts = 0
+            self._proactive_reconnect = False
 
             _LOGGER.info("WebSocket connected successfully")
 
@@ -193,8 +196,8 @@ class GardenaWebSocketClient:
             self.listen_task = asyncio.create_task(
                 self._listen_for_messages(), name="gardena_ws_listen"
             )
-            self.keepalive_task = asyncio.create_task(
-                self._keepalive_loop(), name="gardena_ws_keepalive"
+            self.session_monitor_task = asyncio.create_task(
+                self._session_monitor_loop(), name="gardena_ws_session_monitor"
             )
 
             if self.coordinator:
@@ -208,7 +211,7 @@ class GardenaWebSocketClient:
 
     async def _cancel_tasks(self) -> None:
         """Cancel all running background tasks and wait for them to finish."""
-        for task_attr in ("reconnect_task", "listen_task", "keepalive_task"):
+        for task_attr in ("reconnect_task", "listen_task", "session_monitor_task"):
             task: Optional[asyncio.Task] = getattr(self, task_attr)
             if task and not task.done():
                 task.cancel()
@@ -345,7 +348,7 @@ class GardenaWebSocketClient:
     # Keep-alive + proactive session renewal
     # ------------------------------------------------------------------
 
-    async def _keepalive_loop(self) -> None:
+    async def _session_monitor_loop(self) -> None:
         """Monitor WebSocket session lifetime and reconnect proactively.
 
         Transport-level WebSocket ping/pong is handled automatically by
@@ -358,7 +361,7 @@ class GardenaWebSocketClient:
 
         try:
             while self.is_connected and not self._shutdown:
-                await asyncio.sleep(WEBSOCKET_KEEPALIVE_INTERVAL)
+                await asyncio.sleep(WEBSOCKET_SESSION_CHECK_INTERVAL)
 
                 if not self.is_connected or not self.websocket or self._shutdown:
                     break
@@ -371,6 +374,8 @@ class GardenaWebSocketClient:
                         "for proactive reconnect",
                         session_age,
                     )
+
+                    self._proactive_reconnect = True
 
                     if self.websocket:
                         await self.websocket.close(
@@ -439,21 +444,34 @@ class GardenaWebSocketClient:
         finally:
             self.is_connected = False
 
-            # Cancel keep-alive — no point pinging a closed socket
-            if self.keepalive_task and not self.keepalive_task.done():
-                self.keepalive_task.cancel()
+            # Cancel session monitor — no point monitoring a closed socket
+            if self.session_monitor_task and not self.session_monitor_task.done():
+                self.session_monitor_task.cancel()
 
             if not self._shutdown:
-                if _normal_close:
-                    # Expected 2h expiry — skip backoff and health check,
-                    # reset attempt counter so next cycle starts fresh
+                if self._proactive_reconnect or _normal_close:
+                    # Expected reconnect:
+                    # - proactive renewal before the 2-hour session limit
+                    # - clean server-side close (1000/1001)
+                    #
+                    # Reconnect immediately without warning/backoff/health check.
                     self.reconnect_attempts = 0
+                    self._proactive_reconnect = False
+
+                    _LOGGER.info(
+                        "Reconnecting Gardena WebSocket immediately after "
+                        "normal session renewal"
+                    )
+
                     await self._connect()
                 else:
+                    # Unexpected connection loss — use quota-aware backoff.
                     await self._schedule_reconnect()
 
             if self.coordinator:
-                self.coordinator.async_set_updated_data(self.coordinator.locations)
+                self.coordinator.async_set_updated_data(
+                    self.coordinator.locations
+                )
 
     # ------------------------------------------------------------------
     # Message processing
@@ -467,11 +485,10 @@ class GardenaWebSocketClient:
             await self._send_pong()
             return
 
-        # Service state update (VALVE, MOWER, COMMON, …)
+        # Service state update
         msg_type = data.get("type")
         if msg_type in {
-            "VALVE", "COMMON", "MOWER", "POWER_SOCKET",
-            "SENSOR", "VALVE_SET",
+            "COMMON", "MOWER",
         }:
             await self._process_service_update(data)
             return
@@ -488,12 +505,30 @@ class GardenaWebSocketClient:
             _LOGGER.debug("Service update missing id — skipping")
             return
 
+        # Diagnostic logging for mower activity freshness.
+        # This records exactly what Gardena sent before coordinator processing.
+        if service_type == "MOWER":
+            activity = attributes.get("activity", {})
+            state = attributes.get("state", {})
+
+            _LOGGER.debug(
+                "MOWER event from Gardena: "
+                "activity=%s activity_timestamp=%s "
+                "state=%s state_timestamp=%s",
+                activity.get("value"),
+                activity.get("timestamp"),
+                state.get("value"),
+                state.get("timestamp"),
+            )
+
         # Device ID is the UUID before any ':suffix'  (e.g. "uuid:MOWER")
         device_id = service_id.split(":")[0]
 
         _LOGGER.debug(
             "Service update: id=%s device=%s type=%s",
-            service_id, device_id, service_type,
+            service_id,
+            device_id,
+            service_type,
         )
 
         if self.event_callback:

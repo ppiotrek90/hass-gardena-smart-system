@@ -100,9 +100,6 @@ class GardenaEntity(CoordinatorEntity, ABC):
         return {
             "COMMON": "Status",
             "MOWER": "Lawn Mower",
-            "POWER_SOCKET": "Power Socket",
-            "VALVE": "Valve",
-            "VALVE_SET": "Valve Set",
             "SENSOR": "Sensor",
         }.get(self.service_type, self.service_type.title())
 

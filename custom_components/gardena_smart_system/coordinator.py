@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import timedelta
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 from homeassistant.core import EVENT_HOMEASSISTANT_STARTED, HomeAssistant
@@ -18,9 +18,9 @@ from .websocket_client import GardenaWebSocketClient
 _LOGGER = logging.getLogger(__name__)
 
 # Private API is polled at startup and then at most once per this many seconds,
-# triggered by WebSocket events.  We don't want to poll on every event (mower
+# triggered by WebSocket events. We don't want to poll on every event (mower
 # sends many events while cutting) but we do want reasonably fresh stats data.
-# 3600 s = 1 request/hour = ~168 requests/week — well within the 700/week quota.
+# 300 s = 5 minutes.
 _PRIVATE_REFRESH_MIN_INTERVAL: float = 300.0
 
 # How long to wait after a WebSocket event before hitting the private API.
@@ -34,27 +34,34 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
 
     Flow
     ----
-    1.  ``async_config_entry_first_refresh`` fetches locations + devices from
-        the public REST API (2 requests per location) and then the private API
-        (1 request per location).  This is the *only* REST call we ever make
-        for device state — the public API's 700 req/week quota must last.
-    2.  A WebSocket connection is opened.  Every state change (mower activity,
-        valve status, battery …) arrives as a push message and is applied
-        in-place via ``_update_service_attributes``.
-    3.  When a WebSocket event arrives, ``_request_private_refresh`` schedules
-        a *debounced, rate-limited* call to the private API so that the extra
-        data (GPS, stats, firmware …) stays reasonably fresh without hammering
-        the quota.  The minimum interval between private refreshes is
-        ``_PRIVATE_REFRESH_MIN_INTERVAL`` (1 h by default).
+    1. ``async_config_entry_first_refresh`` fetches locations + devices from
+       the public REST API (2 requests per location) and then the private API
+       (1 request per location). This is the *only* REST call we ever make
+       for device state — the public API's 700 req/week quota must last.
+    2. A WebSocket connection is opened. Every state change (mower activity,
+       battery, etc.) arrives as a push message and is applied in-place via
+       ``_update_service_attributes``.
+    3. When a WebSocket event arrives, ``_request_private_refresh`` schedules
+       a *debounced, rate-limited* call to the private API so that the extra
+       data (GPS, stats, firmware, etc.) stays reasonably fresh without
+       unnecessary polling. The minimum interval between private refreshes is
+       ``_PRIVATE_REFRESH_MIN_INTERVAL`` (5 minutes by default).
     """
 
-    def __init__(self, hass: HomeAssistant, client: GardenaSmartSystemClient) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        client: GardenaSmartSystemClient,
+    ) -> None:
         """Initialize the coordinator."""
         self.client = client
         self.locations: Dict[str, GardenaLocation] = {}
         self.websocket_client: Optional[GardenaWebSocketClient] = None
         self._initial_data_loaded = False
         self._shutdown = False
+
+        # Local end time for START_SECONDS_TO_OVERRIDE mowing session.
+        self.mower_override_end: Optional[datetime] = None
 
         # Private API throttling
         self._private_refresh_lock = asyncio.Lock()
@@ -94,6 +101,7 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
                     hass=self.hass,
                     coordinator=self,
                 )
+
             await self.websocket_client.start()
             _LOGGER.info("WebSocket client started successfully")
 
@@ -101,7 +109,10 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
             # fully started — starting it during bootstrap causes a setup
             # timeout because the task is still pending when HA checks.
             async def _start_periodic_loop(_event=None) -> None:
-                if self._periodic_private_task is None or self._periodic_private_task.done():
+                if (
+                    self._periodic_private_task is None
+                    or self._periodic_private_task.done()
+                ):
                     self._periodic_private_task = self.hass.async_create_task(
                         self._periodic_private_refresh_loop(),
                         name="gardena_private_api_loop",
@@ -113,10 +124,12 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
             else:
                 # HA still booting — wait for started event
                 self.hass.bus.async_listen_once(
-                    EVENT_HOMEASSISTANT_STARTED, _start_periodic_loop
+                    EVENT_HOMEASSISTANT_STARTED,
+                    _start_periodic_loop,
                 )
 
             self.async_set_updated_data(self.locations)
+
         except Exception:
             _LOGGER.exception("Failed to start WebSocket client")
 
@@ -125,11 +138,17 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
         _LOGGER.debug("Shutting down Gardena Smart System coordinator")
         self._shutdown = True
 
-        # Cancel any pending private refresh so it doesn't run after shutdown
-        if self._pending_private_refresh and not self._pending_private_refresh.done():
+        # Cancel any pending private refresh so it doesn't run after shutdown.
+        if (
+            self._pending_private_refresh
+            and not self._pending_private_refresh.done()
+        ):
             self._pending_private_refresh.cancel()
 
-        if self._periodic_private_task and not self._periodic_private_task.done():
+        if (
+            self._periodic_private_task
+            and not self._periodic_private_task.done()
+        ):
             self._periodic_private_task.cancel()
 
         if self.websocket_client:
@@ -147,12 +166,12 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
         """Fetch initial data from the public REST API.
 
         This method is called exactly ONCE at startup by
-        ``async_config_entry_first_refresh``.  After that, every call just
+        ``async_config_entry_first_refresh``. After that, every call just
         returns the cached ``self.locations`` — all live updates arrive via
         the WebSocket and are applied in-place.
 
         The public API costs one ``GET /locations`` + one
-        ``GET /locations/{id}`` per location.  With a 700 req/week quota and
+        ``GET /locations/{id}`` per location. With a 700 req/week quota and
         a weekly HA restart that leaves ~696 requests for WebSocket
         reconnections (each costs 1 POST /v2/websocket).
         """
@@ -163,11 +182,13 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
             )
             return self.locations
 
-        _LOGGER.debug("Starting initial data load from Gardena Smart System")
+        _LOGGER.debug(
+            "Starting initial data load from Gardena Smart System"
+        )
 
         try:
             # Load persisted API request history so weekly counter
-            # survives HA restarts
+            # survives HA restarts.
             await self.client.api_tracker.async_load(self.hass)
 
             locations_list = await self.client.get_locations()
@@ -176,25 +197,30 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
                 try:
                     detailed = await self.client.get_location(location.id)
                     self.locations[location.id] = detailed
+
                     _LOGGER.debug(
                         "Loaded location %s with %d devices",
                         location.id,
                         len(detailed.devices),
                     )
+
                 except Exception:
                     _LOGGER.warning(
-                        "Failed to fetch devices for location %s — keeping basic info",
+                        "Failed to fetch devices for location %s "
+                        "— keeping basic info",
                         location.id,
                         exc_info=True,
                     )
                     self.locations[location.id] = location
 
-            # Private API — once at startup, counts as first refresh
+            # Private API — once at startup, counts as first refresh.
             await self._do_private_refresh()
 
             _LOGGER.info(
-                "Initial data load complete. All future updates will arrive via WebSocket."
+                "Initial data load complete. "
+                "All future updates will arrive via WebSocket."
             )
+
             return self.locations
 
         except Exception:
@@ -205,20 +231,33 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
     # WebSocket event handling
     # ------------------------------------------------------------------
 
-    async def _handle_websocket_event(self, event: Dict[str, Any]) -> None:
+    async def _handle_websocket_event(
+        self,
+        event: Dict[str, Any],
+    ) -> None:
         """Dispatch incoming WebSocket events to the right handler."""
         try:
             event_type = event.get("type")
+
             if event_type == "service_update":
                 await self._process_service_update(event)
+
             elif event_type == "device_event":
                 await self._process_device_event(event["data"])
+
             else:
-                _LOGGER.debug("Unknown WebSocket event type: %s", event_type)
+                _LOGGER.debug(
+                    "Unknown WebSocket event type: %s",
+                    event_type,
+                )
+
         except Exception:
             _LOGGER.exception("Error handling WebSocket event")
 
-    async def _process_service_update(self, event: Dict[str, Any]) -> None:
+    async def _process_service_update(
+        self,
+        event: Dict[str, Any],
+    ) -> None:
         """Apply a service-update event to in-memory device state."""
         service_id = event.get("service_id")
         service_type = event.get("service_type")
@@ -227,31 +266,50 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
 
         _LOGGER.debug(
             "Service update: service_id=%s device_id=%s type=%s",
-            service_id, device_id, service_type,
+            service_id,
+            device_id,
+            service_type,
         )
 
         if not device_id or not service_id:
-            _LOGGER.debug("Service update missing device_id or service_id — skipping")
+            _LOGGER.debug(
+                "Service update missing device_id or service_id — skipping"
+            )
             return
 
-        await self._update_device_from_event(device_id, service_id, service_type, event_data)
+        await self._update_device_from_event(
+            device_id,
+            service_id,
+            service_type,
+            event_data,
+        )
 
-        # Schedule a private-API refresh (debounced + rate-limited)
+        # Schedule a private-API refresh (debounced + rate-limited).
         self._request_private_refresh()
 
         self.async_set_updated_data(self.locations)
 
-    async def _process_device_event(self, event_data: Dict[str, Any]) -> None:
+    async def _process_device_event(
+        self,
+        event_data: Dict[str, Any],
+    ) -> None:
         """Apply a device-event payload to in-memory device state."""
         device_id = event_data.get("device_id")
         service_id = event_data.get("service_id")
         service_type = event_data.get("service_type")
 
         if not device_id or not service_id:
-            _LOGGER.debug("Device event missing device_id or service_id — skipping")
+            _LOGGER.debug(
+                "Device event missing device_id or service_id — skipping"
+            )
             return
 
-        await self._update_device_from_event(device_id, service_id, service_type, event_data)
+        await self._update_device_from_event(
+            device_id,
+            service_id,
+            service_type,
+            event_data,
+        )
 
         self._request_private_refresh()
 
@@ -273,103 +331,137 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
 
             if service_type not in device.services:
                 _LOGGER.debug(
-                    "Service type %s not found on device %s", service_type, device_id
+                    "Service type %s not found on device %s",
+                    service_type,
+                    device_id,
                 )
                 return
 
             for service in device.services[service_type]:
                 if service.id == service_id:
-                    await self._update_service_attributes(service, event_data)
+                    await self._update_service_attributes(
+                        service,
+                        event_data,
+                    )
+
                     _LOGGER.debug(
                         "Updated %s service %s for device %s",
-                        service_type, service_id, device_id,
+                        service_type,
+                        service_id,
+                        device_id,
                     )
                     return
 
             _LOGGER.debug(
                 "Service %s not found in %s services on device %s",
-                service_id, service_type, device_id,
+                service_id,
+                service_type,
+                device_id,
             )
             return
 
-        _LOGGER.debug("Device %s not found in any location", device_id)
+        _LOGGER.debug(
+            "Device %s not found in any location",
+            device_id,
+        )
 
     async def _update_service_attributes(
-        self, service: Any, event_data: Dict[str, Any]
+        self,
+        service: Any,
+        event_data: Dict[str, Any],
     ) -> None:
         """Apply WebSocket event payload to a service model object."""
 
         def _val(data: Dict, key: str) -> Any:
-            """Extract a value that may be wrapped as ``{"value": ...}``."""
+            """Extract a value that may be wrapped as {'value': ...}."""
             raw = data.get(key)
+
             if isinstance(raw, dict) and "value" in raw:
                 return raw["value"]
+
             return raw
 
-        # --- Common ---
+        # --- Service state ---
         if hasattr(service, "state") and "state" in event_data:
             service.state = _val(event_data, "state")
 
+            # Gardena does not always send lastErrorCode=NO_MESSAGE when the
+            # mower recovers from an error. In that case the previously cached
+            # error would remain visible indefinitely.
+            #
+            # Use the service state rather than mower activity to determine
+            # recovery. According to the Gardena API, state=OK means the
+            # service is fully operational. If Gardena explicitly reports OK
+            # without including a new lastErrorCode in the same event, clear
+            # the previously cached error locally.
+            if (
+                hasattr(service, "last_error_code")
+                and (service.state or "").upper() == "OK"
+                and "lastErrorCode" not in event_data
+            ):
+                service.last_error_code = "NO_MESSAGE"
+
+        # --- Mower ---
         if hasattr(service, "activity") and "activity" in event_data:
             service.activity = _val(event_data, "activity")
 
-            # Gardena does not send lastErrorCode: no_message when the mower
-            # recovers from an error — it only sends a new code when the error
-            # *changes*.  So if the activity switches to a known-good state and
-            # lastErrorCode was NOT included in this event, we clear it manually.
-            _OK_ACTIVITIES = {
-                "OK_CUTTING", "OK_CUTTING_TIMER_OVERRIDDEN",
-                "OK_SEARCHING", "OK_LEAVING", "OK_CHARGING",
-                "PARKED_TIMER", "PARKED_PARK_SELECTED", "PARKED_AUTOTIMER",
-                "PARKED_FROST", "PARKED_NO_LIGHT", "PARKED_MOWING_COMPLETED",
-                "PARKED_RAIN", "PARKED_DAILY_LIMIT_REACHED",
-            }
-            if (
-                hasattr(service, "last_error_code")
-                and (service.activity or "").upper() in _OK_ACTIVITIES
-                and "lastErrorCode" not in event_data
-            ):
-                service.last_error_code = "no_message"
-
-        if hasattr(service, "battery_level") and "batteryLevel" in event_data:
-            service.battery_level = _val(event_data, "batteryLevel")
-
-        if hasattr(service, "battery_state") and "batteryState" in event_data:
-            service.battery_state = _val(event_data, "batteryState")
-
-        if hasattr(service, "rf_link_state") and "rfLinkState" in event_data:
-            service.rf_link_state = _val(event_data, "rfLinkState")
-
-        if hasattr(service, "rf_link_level") and "rfLinkLevel" in event_data:
-            service.rf_link_level = _val(event_data, "rfLinkLevel")
-
-        # --- Mower ---
-        if hasattr(service, "operating_hours") and "operatingHours" in event_data:
-            service.operating_hours = _val(event_data, "operatingHours")
-
-        if hasattr(service, "last_error_code") and "lastErrorCode" in event_data:
-            service.last_error_code = _val(event_data, "lastErrorCode")
-
-        # --- Valve ---
-        if hasattr(service, "duration") and "duration" in event_data:
-            raw = event_data["duration"]
-            if isinstance(raw, dict):
-                if "value" in raw:
-                    service.duration = raw["value"]
-                if "timestamp" in raw:
-                    service.duration_timestamp = raw["timestamp"]
-            else:
-                service.duration = raw
-
-        # --- Sensor ---
-        for attr, key in (
-            ("soil_humidity", "soilHumidity"),
-            ("soil_temperature", "soilTemperature"),
-            ("ambient_temperature", "ambientTemperature"),
-            ("light_intensity", "lightIntensity"),
+        if (
+            hasattr(service, "last_error_code")
+            and "lastErrorCode" in event_data
         ):
-            if hasattr(service, attr) and key in event_data:
-                setattr(service, attr, _val(event_data, key))
+            # If Gardena does provide lastErrorCode, always trust the value
+            # received from the API. This also handles an explicit NO_MESSAGE.
+            service.last_error_code = _val(
+                event_data,
+                "lastErrorCode",
+            )
+
+        if (
+            hasattr(service, "operating_hours")
+            and "operatingHours" in event_data
+        ):
+            service.operating_hours = _val(
+                event_data,
+                "operatingHours",
+            )
+
+        # --- Common ---
+        if (
+            hasattr(service, "battery_level")
+            and "batteryLevel" in event_data
+        ):
+            service.battery_level = _val(
+                event_data,
+                "batteryLevel",
+            )
+
+        if (
+            hasattr(service, "battery_state")
+            and "batteryState" in event_data
+        ):
+            service.battery_state = _val(
+                event_data,
+                "batteryState",
+            )
+
+        if (
+            hasattr(service, "rf_link_state")
+            and "rfLinkState" in event_data
+        ):
+            service.rf_link_state = _val(
+                event_data,
+                "rfLinkState",
+            )
+
+        if (
+            hasattr(service, "rf_link_level")
+            and "rfLinkLevel" in event_data
+        ):
+            service.rf_link_level = _val(
+                event_data,
+                "rfLinkLevel",
+            )
+
 
     # ------------------------------------------------------------------
     # Private API — debounced, rate-limited refresh
@@ -378,20 +470,19 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
     def _request_private_refresh(self) -> None:
         """Schedule a private-API refresh, unless one is already pending.
 
-        This is called on every WebSocket event.  To avoid hammering the
-        private API (and burning through the public-API quota for the
-        WebSocket reconnection POST) we apply two guards:
+        This is called on every WebSocket event. To avoid hammering the
+        private API we apply two guards:
 
-        1.  **Debounce** — a single asyncio task is created and waits
-            ``_PRIVATE_REFRESH_DEBOUNCE`` seconds before running.  If another
-            event arrives during that window the existing task handles it;
-            no new task is spawned.
+        1. **Debounce** — a single asyncio task is created and waits
+           ``_PRIVATE_REFRESH_DEBOUNCE`` seconds before running. If another
+           event arrives during that window the existing task handles it;
+           no new task is spawned.
 
-        2.  **Rate-limit** — inside the task we check
-            ``_last_private_refresh``.  If the previous refresh was less than
-            ``_PRIVATE_REFRESH_MIN_INTERVAL`` seconds ago we skip the REST call
-            entirely and just return.  This means at most 1 private-API call
-            per hour regardless of WebSocket event frequency.
+        2. **Rate-limit** — inside the task we check
+           ``_last_private_refresh``. If the previous refresh was less than
+           ``_PRIVATE_REFRESH_MIN_INTERVAL`` seconds ago we skip the REST call
+           entirely and just return. This means at most one private-API call
+           per 5 minutes regardless of WebSocket event frequency.
         """
         if (
             self._pending_private_refresh is None
@@ -402,7 +493,7 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
             )
 
     async def _debounced_private_refresh(self) -> None:
-        """Wait for the debounce window, then refresh if the rate-limit allows."""
+        """Wait for the debounce window, then refresh if rate-limit allows."""
         try:
             await asyncio.sleep(_PRIVATE_REFRESH_DEBOUNCE)
 
@@ -422,14 +513,18 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
             self.async_set_updated_data(self.locations)
 
         except asyncio.CancelledError:
-            pass  # Coordinator is shutting down
+            pass
+
         except Exception:
-            _LOGGER.exception("Error in debounced private refresh")
+            _LOGGER.exception(
+                "Error in debounced private refresh"
+            )
+
         finally:
             self._pending_private_refresh = None
 
     async def _periodic_private_refresh_loop(self) -> None:
-        """Independent timer that refreshes private API every _PRIVATE_REFRESH_MIN_INTERVAL.
+        """Refresh private API periodically.
 
         This runs regardless of WebSocket events — essential for data that
         changes without triggering a WebSocket event (e.g. next_start schedule
@@ -438,38 +533,55 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
         try:
             while not self._shutdown:
                 await asyncio.sleep(_PRIVATE_REFRESH_MIN_INTERVAL)
+
                 if self._shutdown:
                     break
+
                 _LOGGER.debug(
                     "Periodic private API refresh triggered (every %.0fs)",
                     _PRIVATE_REFRESH_MIN_INTERVAL,
                 )
+
                 await self._do_private_refresh()
                 self.async_set_updated_data(self.locations)
+
         except asyncio.CancelledError:
             pass
+
         except Exception:
-            _LOGGER.exception("Error in periodic private refresh loop")
+            _LOGGER.exception(
+                "Error in periodic private refresh loop"
+            )
 
     async def _do_private_refresh(self) -> None:
-        """Fetch private API data for all locations (the actual HTTP call)."""
+        """Fetch private API data for all locations."""
         async with self._private_refresh_lock:
             self._last_private_refresh = time.monotonic()
             self._private_refresh_count += 1
 
             for location in self.locations.values():
                 try:
-                    private = await self.client.get_private_devices(location.id)
+                    private = await self.client.get_private_devices(
+                        location.id
+                    )
 
                     updated = 0
+
                     for private_device in private.get("devices", []):
                         device_id = private_device.get("id")
-                        if device_id and device_id in location.devices:
-                            location.devices[device_id].private_data = private_device
+
+                        if (
+                            device_id
+                            and device_id in location.devices
+                        ):
+                            location.devices[
+                                device_id
+                            ].private_data = private_device
                             updated += 1
 
                     _LOGGER.debug(
-                        "Private API refreshed for location %s — updated %d/%d devices",
+                        "Private API refreshed for location %s "
+                        "— updated %d/%d devices",
                         location.name,
                         updated,
                         len(private.get("devices", [])),
@@ -477,7 +589,8 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
 
                 except Exception:
                     _LOGGER.exception(
-                        "Failed to refresh private API for location %s", location.name
+                        "Failed to refresh private API for location %s",
+                        location.name,
                     )
 
     # ------------------------------------------------------------------
@@ -485,16 +598,15 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
     # ------------------------------------------------------------------
 
     async def async_refresh_private_data(self) -> None:
-        """Force an immediate private API refresh (bypasses rate-limit).
-
-        Public method so that external callers (e.g. a HA service) can
-        trigger a refresh on demand.
-        """
+        """Force an immediate private API refresh (bypasses rate-limit)."""
         await self._do_private_refresh()
         self.async_set_updated_data(self.locations)
 
-    def get_devices_by_type(self, device_type: str) -> list:
-        """Return all devices that have at least one service of *device_type*."""
+    def get_devices_by_type(
+        self,
+        device_type: str,
+    ) -> list:
+        """Return all devices that have at least one service of device_type."""
         return [
             device
             for location in self.locations.values()
@@ -502,9 +614,13 @@ class GardenaSmartSystemCoordinator(DataUpdateCoordinator[Dict[str, GardenaLocat
             if device_type in device.services
         ]
 
-    def get_device_by_id(self, device_id: str) -> Any | None:
+    def get_device_by_id(
+        self,
+        device_id: str,
+    ) -> Any | None:
         """Return a device by its ID, or None if not found."""
         for location in self.locations.values():
             if device_id in location.devices:
                 return location.devices[device_id]
+
         return None
